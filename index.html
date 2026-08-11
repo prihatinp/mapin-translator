@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>MAP-IN Translator V1.0</title>
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<div class="app">
+
+  <header class="topbar">
+    <div class="brand">
+      <div class="logo">M</div>
+      <div>
+        <h1>MAP-IN Translator <span style="color:#e8622c">V1.0</span></h1>
+        <p>Penerjemah suara real-time dua arah — PT Musashi Autoparts Indonesia</p>
+      </div>
+    </div>
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+      <span class="status-pill"><span id="netDot" class="dot"></span> <span id="netText">Memeriksa...</span></span>
+      <span class="status-pill">⏱️ <span id="latencyText">-- ms</span></span>
+      <button class="btn btn-ghost" id="btnSettings">⚙️ Pengaturan</button>
+    </div>
+  </header>
+
+  <section class="controls-card">
+    <div class="field">
+      <label>Bahasa Pembicara A (Panel Kiri)</label>
+      <select id="langA"></select>
+    </div>
+    <div class="field">
+      <label>Bahasa Pembicara B (Panel Kanan)</label>
+      <select id="langB"></select>
+    </div>
+    <div class="field">
+      <label>Kecepatan Suara (Intonasi)</label>
+      <div class="pill-toggle" id="speedToggle">
+        <button data-speed="0.7">Lambat</button>
+        <button data-speed="1.0" class="active">Sedang</button>
+        <button data-speed="1.3">Cepat</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>Mode Percakapan</label>
+      <div class="pill-toggle" id="modeToggle">
+        <button data-mode="ptt" class="active">Tekan-untuk-Bicara</button>
+        <button data-mode="auto">Otomatis (deteksi bahasa)</button>
+        <button data-mode="meeting">Mode Meeting/Zoom</button>
+      </div>
+    </div>
+    <div class="field" style="margin-left:auto;">
+      <label>&nbsp;</label>
+      <div class="mode-row">
+        <button class="btn btn-primary" id="btnStart">▶️ Mulai Sesi</button>
+        <button class="btn btn-danger" id="btnStop" disabled>⏹️ Selesai</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="panels">
+    <div class="panel left" id="panelA">
+      <div class="panel-header">
+        <h2>Pembicara A</h2>
+        <span class="lang-tag" id="langATag">Bahasa Indonesia</span>
+      </div>
+      <div class="transcript" id="transcriptA"></div>
+      <div class="mic-row">
+        <button class="mic-btn" id="micA">🎤</button>
+        <div class="mic-live-text" id="liveA"></div>
+        <div class="mic-hint">Tahan tombol untuk bicara (Push-to-Talk)</div>
+      </div>
+    </div>
+
+    <div class="panel right" id="panelB">
+      <div class="panel-header">
+        <h2>Pembicara B</h2>
+        <span class="lang-tag" id="langBTag">Bahasa Jepang</span>
+      </div>
+      <div class="transcript" id="transcriptB"></div>
+      <div class="mic-row">
+        <button class="mic-btn" id="micB">🎤</button>
+        <div class="mic-live-text" id="liveB"></div>
+        <div class="mic-hint">Tahan tombol untuk bicara (Push-to-Talk)</div>
+      </div>
+    </div>
+  </section>
+
+  <div class="bottombar">
+    <div class="small-note">Sesi tersimpan sementara di perangkat ini saja (tidak dikirim ke server kecuali diunduh).</div>
+    <div class="footer-actions">
+      <button class="btn btn-secondary" id="btnGlossary">📘 Kamus Istilah</button>
+      <button class="btn btn-secondary" id="btnDownload">⬇️ Unduh Transkrip</button>
+      <button class="btn btn-secondary" id="btnClear">🗑️ Bersihkan</button>
+    </div>
+  </div>
+
+</div>
+
+<!-- Settings Modal -->
+<div class="modal-overlay" id="settingsModal">
+  <div class="modal">
+    <button class="close-x" data-close="settingsModal">✕</button>
+    <h3>⚙️ Pengaturan Backend & Keamanan</h3>
+    <p class="small-note">Sesuai PRD §11, mode <strong>Produksi</strong> memakai backend Google Apps Script (API key tersimpan di server, bukan di kode frontend). Mode <strong>Demo</strong> memakai layanan terjemahan publik langsung dari browser — hanya untuk uji coba, bukan untuk data sensitif.</p>
+    <div class="field" style="margin-bottom:10px;">
+      <label>Mode Backend</label>
+      <div class="pill-toggle" id="backendToggle">
+        <button data-backend="demo" class="active">Demo (tanpa setup)</button>
+        <button data-backend="appsscript">Produksi (Apps Script)</button>
+      </div>
+    </div>
+    <div class="row">
+      <input type="text" id="appsScriptUrl" placeholder="URL Web App Apps Script (https://script.google.com/macros/s/.../exec)" />
+    </div>
+    <div class="row">
+      <input type="password" id="appsScriptKey" placeholder="API Key (harus sama dengan Script Properties di Apps Script)" />
+    </div>
+    <button class="btn btn-primary" id="btnSaveSettings">Simpan Pengaturan</button>
+    <p class="small-note" style="margin-top:14px;">Lihat file <code>backend/Code.gs</code> dan <code>DEPLOY_GUIDE.md</code> untuk cara deploy backend Apps Script Anda sendiri.</p>
+  </div>
+</div>
+
+<!-- Glossary Modal -->
+<div class="modal-overlay" id="glossaryModal">
+  <div class="modal">
+    <button class="close-x" data-close="glossaryModal">✕</button>
+    <h3>📘 Kamus Istilah Kustom</h3>
+    <p class="small-note">Istilah teknis/nama perusahaan di kolom kiri tidak akan diterjemahkan — akan dipertahankan apa adanya dalam hasil terjemahan.</p>
+    <div class="row">
+      <input type="text" id="glossTerm" placeholder="Istilah (mis: Musashi Autoparts)" />
+      <button class="btn btn-secondary" id="btnAddGloss">+ Tambah</button>
+    </div>
+    <div class="glossary-list" id="glossaryList"></div>
+  </div>
+</div>
+
+<script src="config.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
