@@ -742,16 +742,22 @@ $("btnClear").addEventListener("click", () => {
   state.transcriptLog = [];
 });
 
+function transcriptHeaderLines() {
+  const lines = [];
+  lines.push("MAP-IN Translator V1.0 — Transkrip Percakapan");
+  lines.push("Tanggal: " + new Date().toLocaleString());
+  if (state.deviceMode === "dual") {
+    lines.push("Mode: Grup Multi-HP — Ruangan \"" + (state.roomName || "-") + "\" (Kode: " + state.sessionCode + ")");
+  } else {
+    lines.push("Pasangan Bahasa: " + labelA() + " (" + langByCode(state.langA).label + ") <-> " +
+      labelB() + " (" + langByCode(state.langB).label + ")");
+  }
+  return lines;
+}
+
 $("btnDownload").addEventListener("click", () => {
   if (state.transcriptLog.length === 0) { alert("Belum ada transkrip untuk diunduh."); return; }
-  let out = "MAP-IN Translator V1.0 — Transkrip Percakapan\n";
-  out += "Tanggal: " + new Date().toLocaleString() + "\n";
-  if (state.deviceMode === "dual") {
-    out += "Mode: Grup Multi-HP (Kode Sesi: " + state.sessionCode + ")\n";
-  } else {
-    out += "Pasangan Bahasa: " + labelA() + " (" + langByCode(state.langA).label + ") <-> " +
-      labelB() + " (" + langByCode(state.langB).label + ")\n";
-  }
+  let out = transcriptHeaderLines().join("\n") + "\n";
   out += "=".repeat(50) + "\n\n";
   state.transcriptLog.forEach(row => {
     out += `[${row.time}] ${row.speaker}: ${row.original}\n`;
@@ -764,6 +770,66 @@ $("btnDownload").addEventListener("click", () => {
   a.download = `mapin-transkrip-${Date.now()}.txt`;
   a.click();
   URL.revokeObjectURL(url);
+});
+
+// ---------- Unduh transkrip sebagai PDF ----------
+// Memakai fitur "cetak" bawaan browser (bukan library PDF pihak ketiga),
+// supaya font Jepang/Thai/Arab/Vietnam dirender pakai font sistem yang
+// SAMA seperti yang sudah tampil benar di layar aplikasi — menghindari
+// masalah "tulisan kacau/kotak-kotak" yang sering terjadi kalau font PDF
+// tidak mendukung aksara non-Latin. Di HP (Android/iOS Chrome & Safari),
+// dialog cetak punya opsi "Simpan sebagai PDF" / "Save as PDF".
+function escapeHtml_(str) {
+  return String(str)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+$("btnDownloadPdf").addEventListener("click", () => {
+  if (state.transcriptLog.length === 0) { alert("Belum ada transkrip untuk diunduh."); return; }
+
+  const headerLines = transcriptHeaderLines();
+  const rowsHtml = state.transcriptLog.map(row => `
+    <div class="row">
+      <div class="meta">${escapeHtml_(row.time)} — <strong>${escapeHtml_(row.speaker)}</strong></div>
+      <div class="orig">${escapeHtml_(row.original)}</div>
+      ${row.translated ? `<div class="trans">→ ${escapeHtml_(row.translated)}</div>` : ""}
+    </div>`).join("");
+
+  const html = `<!DOCTYPE html>
+<html lang="id"><head><meta charset="UTF-8" />
+<title>MAP-IN Transkrip</title>
+<style>
+  body { font-family: "Noto Sans", "Segoe UI", Arial, sans-serif; padding: 24px; color: #222; }
+  h1 { font-size: 18px; margin-bottom: 4px; }
+  .header-line { font-size: 12px; color: #555; margin: 2px 0; }
+  hr { margin: 14px 0 18px; border: none; border-top: 1px solid #ccc; }
+  .row { margin-bottom: 14px; page-break-inside: avoid; }
+  .meta { font-size: 11px; color: #888; margin-bottom: 2px; }
+  .orig { font-size: 14px; font-weight: 600; }
+  .trans { font-size: 14px; color: #444; font-style: italic; margin-top: 2px; }
+  @media print { body { padding: 0; } }
+</style></head>
+<body>
+  <h1>MAP-IN Translator V1.0 — Transkrip Percakapan</h1>
+  ${headerLines.slice(1).map(l => `<div class="header-line">${escapeHtml_(l)}</div>`).join("")}
+  <hr />
+  ${rowsHtml}
+  <script>
+    window.onload = function () {
+      setTimeout(function () { window.print(); }, 300);
+    };
+  <\/script>
+</body></html>`;
+
+  const printWindow = window.open("", "_blank");
+  if (!printWindow) {
+    alert("Popup diblokir browser. Izinkan popup untuk situs ini agar bisa mengunduh PDF.");
+    return;
+  }
+  printWindow.document.open();
+  printWindow.document.write(html);
+  printWindow.document.close();
 });
 
 updateMicHints();
