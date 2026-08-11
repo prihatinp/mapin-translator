@@ -15,6 +15,8 @@ const LANGUAGES = [
 const state = {
   langA: "id",
   langB: "ja",
+  nameA: "",
+  nameB: "",
   speed: 1.0,
   mode: "ptt", // ptt | auto | meeting
   backend: localStorage.getItem("mapin_backend") || MAPIN_CONFIG.backendMode,
@@ -22,10 +24,27 @@ const state = {
   appsScriptKey: localStorage.getItem("mapin_key") || MAPIN_CONFIG.appsScriptApiKey,
   glossary: JSON.parse(localStorage.getItem("mapin_glossary") || "[]"),
   sessionActive: false,
-  transcriptLog: []
+  transcriptLog: [],
+
+  // ---- Mode Grup Multi-HP (2-5 pembicara, masing-masing HP sendiri) ----
+  deviceMode: "single", // "single" | "dual" (dual = mode grup multi-HP)
+  myName: "",
+  myLang: "id",
+  participantId: null,
+  sessionCode: "",
+  roomName: "",
+  isHost: false,
+  roomLocked: false,
+  sessionConnected: false,
+  pollTimer: null,
+  pollSinceIndex: 0,
+  participants: []
 };
 
 const $ = (id) => document.getElementById(id);
+
+function labelA() { return (state.nameA && state.nameA.trim()) || "Pembicara A"; }
+function labelB() { return (state.nameB && state.nameB.trim()) || "Pembicara B"; }
 
 // ---------- Setup language selects ----------
 function fillLangSelect(sel, selected) {
@@ -40,6 +59,7 @@ function fillLangSelect(sel, selected) {
 }
 fillLangSelect($("langA"), state.langA);
 fillLangSelect($("langB"), state.langB);
+fillLangSelect($("myLangSelect"), state.myLang);
 updateLangTags();
 
 function langByCode(code) { return LANGUAGES.find(l => l.code === code); }
@@ -51,6 +71,18 @@ function updateLangTags() {
 $("langA").addEventListener("change", e => { state.langA = e.target.value; updateLangTags(); });
 $("langB").addEventListener("change", e => { state.langB = e.target.value; updateLangTags(); });
 
+// ---------- Nama pembicara (mode 1 HP) ----------
+$("nameA").addEventListener("input", e => { state.nameA = e.target.value; });
+$("nameB").addEventListener("input", e => { state.nameB = e.target.value; });
+
+// ---------- Mode Grup: nama & bahasa saya ----------
+$("myNameInput").addEventListener("input", e => { state.myName = e.target.value; });
+$("myLangSelect").addEventListener("change", e => {
+  state.myLang = e.target.value;
+  $("myLangTag").textContent = "Bahasa Saya: " + langByCode(state.myLang).label;
+});
+$("myLangTag").textContent = "Bahasa Saya: " + langByCode(state.myLang).label;
+
 // ---------- Speed toggle ----------
 $("speedToggle").addEventListener("click", e => {
   const btn = e.target.closest("button[data-speed]");
@@ -60,7 +92,7 @@ $("speedToggle").addEventListener("click", e => {
   state.speed = parseFloat(btn.dataset.speed);
 });
 
-// ---------- Mode toggle ----------
+// ---------- Mode percakapan toggle (ptt/auto/meeting) ----------
 const meetingNote = document.createElement("div");
 meetingNote.className = "small-note";
 meetingNote.style.marginTop = "8px";
@@ -76,20 +108,17 @@ $("modeToggle").addEventListener("click", e => {
   meetingNote.remove();
   if (state.mode === "meeting") {
     $("modeToggle").parentElement.appendChild(meetingNote);
-    $("panelB").querySelector(".panel-header h2").textContent = "Peserta Meeting";
-    $("micB").querySelector ? null : null;
-  } else {
-    $("panelB").querySelector(".panel-header h2").textContent = "Pembicara B";
+    $("nameB").value = "Peserta Meeting";
+    state.nameB = "Peserta Meeting";
   }
   updateMicHints();
 });
 
 function updateMicHints() {
-  const hints = document.querySelectorAll(".mic-hint");
   let txt = "Tahan tombol untuk bicara (Push-to-Talk)";
   if (state.mode === "auto") txt = "Klik sekali untuk mulai/berhenti mendengarkan otomatis";
   if (state.mode === "meeting") txt = "Klik untuk mulai mendengarkan audio meeting secara terus-menerus";
-  hints.forEach(h => h.textContent = txt);
+  document.querySelectorAll("#classicPanels .mic-hint").forEach(h => h.textContent = txt);
 }
 
 // ---------- Network / latency indicator ----------
@@ -199,7 +228,7 @@ function sanitize(text) {
     .slice(0, MAPIN_CONFIG.maxTextLength);
 }
 
-// ---------- Translation ----------
+// ---------- Translation (dipakai Mode 1-HP; Mode Grup menerjemahkan di server saat poll) ----------
 async function translateText(text, sourceCode, targetCode) {
   const clean = sanitize(text);
   const { text: protectedText, map } = protectGlossary(clean);
@@ -221,21 +250,242 @@ async function translateViaDemoApi(text, sourceCode, targetCode) {
 }
 
 async function translateViaAppsScript(text, sourceCode, targetCode) {
+  const data = await callBackend("translate", { text, source: sourceCode, target: targetCode });
+  return data.translatedText;
+}
+
+// Generic caller untuk semua aksi backend (translate, createSession, joinSession, send, poll)
+async function callBackend(action, payload) {
+  if (!state.appsScriptUrl) throw new Error("URL Apps Script belum diatur di ⚙️ Pengaturan.");
   const res = await fetch(state.appsScriptUrl, {
     method: "POST",
     headers: { "Content-Type": "text/plain;charset=utf-8" }, // avoids CORS preflight on Apps Script
-    body: JSON.stringify({
-      apiKey: state.appsScriptKey,
-      text, source: sourceCode, target: targetCode
-    })
+    body: JSON.stringify(Object.assign({ apiKey: state.appsScriptKey, action }, payload))
   });
   if (!res.ok) throw new Error("Backend error " + res.status);
   const data = await res.json();
   if (data.error) throw new Error(data.error);
-  return data.translatedText;
+  return data;
 }
 
-// ---------- Script-based language auto-detection (heuristic, demo mode) ----------
+// ============================================================
+// Mode Grup Multi-HP — sesi & relay pesan antar 2-5 perangkat
+// Konsep: tiap HP hanya bicara & mendengar dalam BAHASANYA SENDIRI.
+// Server menerjemahkan tiap pesan sesuai bahasa masing-masing pendengar
+// saat poll — supaya layar tidak dipenuhi banyak bahasa sekaligus.
+// ============================================================
+function requireAppsScriptBackend() {
+  if (state.backend !== "appsscript" || !state.appsScriptUrl) {
+    alert("Mode Grup Multi-HP butuh backend Produksi (Apps Script) aktif.\nBuka ⚙️ Pengaturan, pilih 'Produksi (Apps Script)', isi URL & API Key, lalu coba lagi.");
+    return false;
+  }
+  return true;
+}
+
+function setSessionStatus(text, kind) {
+  $("sessionStatusText").textContent = text;
+  $("sessionDot").className = "dot " + (kind || "");
+}
+
+function renderParticipants() {
+  const box = $("participantsList");
+  box.innerHTML = "";
+  state.participants.forEach(p => {
+    const span = document.createElement("span");
+    span.className = "status-pill";
+    const mine = p.participantId === state.participantId;
+    span.textContent = (mine ? "🟠 " : "👤 ") + p.name + " (" + langByCode(p.lang).label + ")" + (mine ? " — saya" : "");
+    box.appendChild(span);
+  });
+}
+
+async function createSession() {
+  if (!requireAppsScriptBackend()) return;
+  const name = ($("myNameInput").value || "").trim() || "Peserta";
+  const roomName = ($("roomNameInput").value || "").trim() || "Ruangan Tanpa Nama";
+  const pin = ($("roomPinInput").value || "").trim();
+  const isPublic = $("roomPublicCheckbox").checked;
+  state.myName = name;
+  setSessionStatus("Membuat ruangan...", "connecting");
+  try {
+    const data = await callBackend("createSession", { name, lang: state.myLang, roomName, pin, isPublic });
+    state.sessionCode = data.sessionCode;
+    state.participantId = data.participantId;
+    state.roomName = data.roomName;
+    state.isHost = true;
+    state.roomLocked = false;
+    state.participants = data.participants || [];
+    $("sessionCodeInput").value = data.sessionCode;
+    state.sessionConnected = true;
+    state.pollSinceIndex = 0;
+    renderParticipants();
+    updateLockButton();
+    $("groupPanelTitle").textContent = "💬 " + state.roomName;
+    setSessionStatus("Tersambung ke \"" + state.roomName + "\" — bagikan kode: " + data.sessionCode + (pin ? " (+ PIN)" : ""), "online");
+    addBubble("transcriptGroup", "Ruangan \"" + state.roomName + "\" dibuat" + (pin ? " dengan PIN" : "") + ". Bagikan kode " + data.sessionCode + " ke rekan lain lewat jalur terpisah (maks. 5 peserta).", null, "Sistem");
+    startPolling();
+  } catch (err) {
+    setSessionStatus("Gagal membuat ruangan: " + err.message, "offline");
+  }
+}
+
+async function joinSession(codeOverride) {
+  if (!requireAppsScriptBackend()) return;
+  const code = (codeOverride || $("sessionCodeInput").value.trim()).toUpperCase();
+  const name = ($("myNameInput").value || "").trim() || "Peserta";
+  const pin = ($("roomPinInput").value || "").trim();
+  if (!code) { alert("Masukkan kode ruangan terlebih dahulu."); return; }
+  state.myName = name;
+  setSessionStatus("Menyambungkan...", "connecting");
+  try {
+    const data = await callBackend("joinSession", { sessionCode: code, name, lang: state.myLang, pin });
+    state.sessionCode = code;
+    state.participantId = data.participantId;
+    state.roomName = data.roomName || "Ruangan " + code;
+    state.isHost = false;
+    state.roomLocked = false;
+    state.participants = data.participants || [];
+    state.sessionConnected = true;
+    state.pollSinceIndex = 0;
+    renderParticipants();
+    updateLockButton();
+    $("groupPanelTitle").textContent = "💬 " + state.roomName;
+    setSessionStatus("Tersambung ke \"" + state.roomName + "\" (" + code + ")", "online");
+    addBubble("transcriptGroup", "Bergabung ke ruangan \"" + state.roomName + "\".", null, "Sistem");
+    closeModal("roomsModal");
+    startPolling();
+  } catch (err) {
+    setSessionStatus("Gagal gabung: " + err.message, "offline");
+  }
+}
+
+function updateLockButton() {
+  const btn = $("btnLockRoom");
+  if (state.isHost && state.sessionConnected) {
+    btn.style.display = "inline-flex";
+    btn.textContent = state.roomLocked ? "🔓 Buka Kunci Ruangan" : "🔒 Kunci Ruangan";
+  } else {
+    btn.style.display = "none";
+  }
+}
+
+async function toggleLockRoom() {
+  try {
+    const data = await callBackend("lockRoom", { sessionCode: state.sessionCode, participantId: state.participantId });
+    state.roomLocked = data.locked;
+    updateLockButton();
+    addBubble("transcriptGroup", state.roomLocked ? "🔒 Ruangan dikunci — tidak menerima peserta baru." : "🔓 Ruangan dibuka kembali.", null, "Sistem");
+  } catch (err) {
+    alert("Gagal mengubah status kunci: " + err.message);
+  }
+}
+$("btnLockRoom").addEventListener("click", toggleLockRoom);
+
+async function listActiveRooms() {
+  if (!requireAppsScriptBackend()) return;
+  const box = $("roomsList");
+  box.innerHTML = "<p class='small-note'>Memuat...</p>";
+  openModal("roomsModal");
+  try {
+    const data = await callBackend("listRooms", {});
+    const rooms = data.rooms || [];
+    $("roomsEmptyNote").style.display = rooms.length === 0 ? "block" : "none";
+    box.innerHTML = "";
+    rooms.forEach(r => {
+      const row = document.createElement("div");
+      row.className = "glossary-item";
+      row.style.alignItems = "center";
+      row.innerHTML = `<span><strong>${r.roomName}</strong> — kode ${r.code} · ${r.participantCount}/${MAPIN_MAX_PARTICIPANTS_DISPLAY} peserta</span>`;
+      const btn = document.createElement("button");
+      btn.className = "btn btn-secondary";
+      btn.textContent = "Gabung";
+      btn.style.fontSize = "12px";
+      btn.style.padding = "6px 12px";
+      btn.addEventListener("click", () => joinSession(r.code));
+      row.appendChild(btn);
+      box.appendChild(row);
+    });
+  } catch (err) {
+    box.innerHTML = `<p class="small-note">Gagal memuat daftar ruangan: ${err.message}</p>`;
+  }
+}
+const MAPIN_MAX_PARTICIPANTS_DISPLAY = 5;
+
+function startPolling() {
+  stopPolling();
+  state.pollTimer = setInterval(pollSessionMessages, 1500);
+}
+function stopPolling() {
+  if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+}
+
+async function pollSessionMessages() {
+  if (!state.sessionConnected || !state.sessionCode) return;
+  try {
+    const data = await callBackend("poll", {
+      sessionCode: state.sessionCode,
+      participantId: state.participantId,
+      sinceIndex: state.pollSinceIndex,
+      myLang: state.myLang
+    });
+    state.pollSinceIndex = data.nextIndex;
+    if (data.participants) { state.participants = data.participants; renderParticipants(); }
+    if (typeof data.locked === "boolean" && data.locked !== state.roomLocked) {
+      state.roomLocked = data.locked;
+      updateLockButton();
+    }
+    (data.messages || []).forEach(handleIncomingGroupMessage);
+  } catch (err) {
+    console.warn("Poll gagal:", err.message);
+    setSessionStatus("Koneksi terganggu: " + err.message, "offline");
+  }
+}
+
+function handleIncomingGroupMessage(msg) {
+  if (msg.participantId === state.participantId) return; // pesan sendiri sudah ditampilkan lokal
+  addBubble("transcriptGroup", msg.original, msg.translatedText,
+    msg.name + " · " + langByCode(msg.sourceLang).label + " (masuk)");
+  speak(msg.translatedText, state.myLang);
+}
+
+async function sendToGroupSession(original) {
+  if (state.deviceMode !== "dual" || !state.sessionConnected) return;
+  try {
+    await callBackend("send", { sessionCode: state.sessionCode, participantId: state.participantId, original });
+  } catch (err) {
+    console.warn("Gagal mengirim ke sesi:", err.message);
+    addBubble("transcriptGroup", "⚠️ Gagal mengirim pesan: " + err.message, null, "Sistem");
+  }
+}
+
+// ---------- Device mode toggle (1 HP vs Grup Multi-HP) ----------
+$("deviceModeToggle").addEventListener("click", e => {
+  const btn = e.target.closest("button[data-devicemode]");
+  if (!btn) return;
+  const newMode = btn.dataset.devicemode;
+  if (newMode === "dual" && !requireAppsScriptBackend()) return;
+  [...$("deviceModeToggle").children].forEach(b => b.classList.remove("active"));
+  btn.classList.add("active");
+  state.deviceMode = newMode;
+  $("dualSessionCard").style.display = newMode === "dual" ? "flex" : "none";
+  $("classicPanels").style.display = newMode === "dual" ? "none" : "grid";
+  $("groupPanel").style.display = newMode === "dual" ? "flex" : "none";
+  $("langAField").style.display = newMode === "dual" ? "none" : "flex";
+  $("langBField").style.display = newMode === "dual" ? "none" : "flex";
+  if (newMode === "single") {
+    state.sessionConnected = false;
+    state.isHost = false;
+    stopPolling();
+    setSessionStatus("Belum tersambung", "");
+    updateLockButton();
+  }
+});
+
+$("btnCreateSession").addEventListener("click", createSession);
+$("btnJoinSession").addEventListener("click", () => joinSession());
+$("btnListRooms").addEventListener("click", listActiveRooms);
+
+// ---------- Script-based language auto-detection (heuristik, mode demo) ----------
 function detectScript(text) {
   if (/[぀-ヿ一-鿿]/.test(text)) return "ja";
   if (/[฀-๿]/.test(text)) return "th";
@@ -303,16 +553,16 @@ function createRecognizer(langStt, { continuous = false, onInterim, onFinal, onE
   return rec;
 }
 
-// ---------- Panel A / B controllers ----------
-function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTranscriptId, getMyLang, getOtherLang, speakerLabel }) {
+// ---------- Panel A / B controllers (Mode 1-HP, 2 headset) ----------
+function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTranscriptId, getMyLang, getOtherLang, getSpeakerLabel }) {
   let recognizer = null;
   let listening = false;
-  let holdMode = true; // push-to-talk
 
   async function handleFinalText(text, sourceLangOverride) {
     $(liveTextId).textContent = "";
     const sourceLang = sourceLangOverride || getMyLang();
     const targetLang = getOtherLang();
+    const speakerLabel = getSpeakerLabel();
     addBubble(transcriptId, text, null, speakerLabel + " (asli)");
     try {
       const translated = await translateText(text, sourceLang, targetLang);
@@ -347,7 +597,7 @@ function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTransc
       onEnd: () => {
         listening = false;
         setMicListening(micBtnId, false);
-        if (continuous && listening !== false && state.sessionActive && recognizer && recognizer.__shouldRestart) {
+        if (continuous && state.sessionActive && recognizer && recognizer.__shouldRestart) {
           try { recognizer.start(); } catch {}
         }
       },
@@ -374,13 +624,11 @@ function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTransc
   }
 
   const btn = $(micBtnId);
-  // Push-to-talk (mousedown/up + touch)
   btn.addEventListener("mousedown", () => { if (state.mode === "ptt") start(false); });
   btn.addEventListener("mouseup", () => { if (state.mode === "ptt") stop(); });
   btn.addEventListener("mouseleave", () => { if (state.mode === "ptt" && listening) stop(); });
   btn.addEventListener("touchstart", (e) => { e.preventDefault(); if (state.mode === "ptt") start(false); });
   btn.addEventListener("touchend", (e) => { e.preventDefault(); if (state.mode === "ptt") stop(); });
-  // Click toggle for auto/meeting continuous modes
   btn.addEventListener("click", () => {
     if (state.mode === "ptt") return;
     if (listening) stop(); else start(true);
@@ -390,39 +638,107 @@ function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTransc
 }
 
 let speakerA, speakerB;
-
 function initControllers() {
   speakerA = makeSpeakerController({
     micBtnId: "micA", liveTextId: "liveA", transcriptId: "transcriptA", otherTranscriptId: "transcriptB",
-    getMyLang: () => state.langA, getOtherLang: () => state.langB, speakerLabel: "Pembicara A"
+    getMyLang: () => state.langA, getOtherLang: () => state.langB, getSpeakerLabel: labelA
   });
   speakerB = makeSpeakerController({
     micBtnId: "micB", liveTextId: "liveB", transcriptId: "transcriptB", otherTranscriptId: "transcriptA",
-    getMyLang: () => state.langB, getOtherLang: () => state.langA, speakerLabel: "Pembicara B"
+    getMyLang: () => state.langB, getOtherLang: () => state.langA, getSpeakerLabel: labelB
   });
 }
 initControllers();
+
+// ---------- Mic controller Mode Grup (satu bahasa per HP) ----------
+let groupMic = null;
+function initGroupMic() {
+  let recognizer = null;
+  let listening = false;
+
+  async function handleFinalText(text) {
+    $("liveGroup").textContent = "";
+    addBubble("transcriptGroup", text, null, (state.myName || "Saya") + " (saya, asli)");
+    sendToGroupSession(text);
+  }
+
+  function start(continuous) {
+    if (!state.sessionActive) { alert("Tekan 'Mulai Sesi' terlebih dahulu."); return; }
+    if (!state.sessionConnected) { alert("Gabung/buat sesi grup terlebih dahulu."); return; }
+    recognizer = createRecognizer(langByCode(state.myLang).stt, {
+      continuous,
+      onInterim: (t) => $("liveGroup").textContent = t,
+      onFinal: (t) => { handleFinalText(t); if (!continuous) stop(); },
+      onEnd: () => {
+        listening = false;
+        setMicListening("micGroup", false);
+        if (continuous && state.sessionActive && recognizer && recognizer.__shouldRestart) {
+          try { recognizer.start(); } catch {}
+        }
+      },
+      onError: (e) => {
+        console.warn("STT error", e.error);
+        if (e.error === "not-allowed") alert("Izin microphone ditolak. Aktifkan izin microphone di browser Anda.");
+      }
+    });
+    if (!recognizer) return;
+    recognizer.__shouldRestart = continuous;
+    listening = true;
+    setMicListening("micGroup", true);
+    try { recognizer.start(); } catch (e) { console.warn(e); }
+  }
+
+  function stop() {
+    listening = false;
+    if (recognizer) { recognizer.__shouldRestart = false; try { recognizer.stop(); } catch {} }
+    setMicListening("micGroup", false);
+    $("liveGroup").textContent = "";
+  }
+
+  const btn = $("micGroup");
+  btn.addEventListener("mousedown", () => { if (state.mode === "ptt") start(false); });
+  btn.addEventListener("mouseup", () => { if (state.mode === "ptt") stop(); });
+  btn.addEventListener("mouseleave", () => { if (state.mode === "ptt" && listening) stop(); });
+  btn.addEventListener("touchstart", (e) => { e.preventDefault(); if (state.mode === "ptt") start(false); });
+  btn.addEventListener("touchend", (e) => { e.preventDefault(); if (state.mode === "ptt") stop(); });
+  btn.addEventListener("click", () => {
+    if (state.mode === "ptt") return;
+    if (listening) stop(); else start(true);
+  });
+
+  return { stop };
+}
+groupMic = initGroupMic();
 
 // ---------- Session controls ----------
 $("btnStart").addEventListener("click", () => {
   state.sessionActive = true;
   $("btnStart").disabled = true;
   $("btnStop").disabled = false;
-  addBubble("transcriptA", "— Sesi dimulai —", null, "Sistem");
-  addBubble("transcriptB", "— Sesi dimulai —", null, "Sistem");
+  if (state.deviceMode === "dual") {
+    addBubble("transcriptGroup", "— Sesi dimulai —", null, "Sistem");
+  } else {
+    addBubble("transcriptA", "— Sesi dimulai —", null, "Sistem");
+    addBubble("transcriptB", "— Sesi dimulai —", null, "Sistem");
+  }
 });
 $("btnStop").addEventListener("click", () => {
   state.sessionActive = false;
-  speakerA.stop(); speakerB.stop();
+  speakerA.stop(); speakerB.stop(); groupMic.stop();
   $("btnStart").disabled = false;
   $("btnStop").disabled = true;
-  addBubble("transcriptA", "— Sesi selesai —", null, "Sistem");
-  addBubble("transcriptB", "— Sesi selesai —", null, "Sistem");
+  if (state.deviceMode === "dual") {
+    addBubble("transcriptGroup", "— Sesi selesai —", null, "Sistem");
+  } else {
+    addBubble("transcriptA", "— Sesi selesai —", null, "Sistem");
+    addBubble("transcriptB", "— Sesi selesai —", null, "Sistem");
+  }
 });
 
 $("btnClear").addEventListener("click", () => {
   $("transcriptA").innerHTML = "";
   $("transcriptB").innerHTML = "";
+  $("transcriptGroup").innerHTML = "";
   state.transcriptLog = [];
 });
 
@@ -430,7 +746,12 @@ $("btnDownload").addEventListener("click", () => {
   if (state.transcriptLog.length === 0) { alert("Belum ada transkrip untuk diunduh."); return; }
   let out = "MAP-IN Translator V1.0 — Transkrip Percakapan\n";
   out += "Tanggal: " + new Date().toLocaleString() + "\n";
-  out += "Pasangan Bahasa: " + langByCode(state.langA).label + " <-> " + langByCode(state.langB).label + "\n";
+  if (state.deviceMode === "dual") {
+    out += "Mode: Grup Multi-HP (Kode Sesi: " + state.sessionCode + ")\n";
+  } else {
+    out += "Pasangan Bahasa: " + labelA() + " (" + langByCode(state.langA).label + ") <-> " +
+      labelB() + " (" + langByCode(state.langB).label + ")\n";
+  }
   out += "=".repeat(50) + "\n\n";
   state.transcriptLog.forEach(row => {
     out += `[${row.time}] ${row.speaker}: ${row.original}\n`;

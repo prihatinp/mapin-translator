@@ -11,7 +11,7 @@
 
   <header class="topbar">
     <div class="brand">
-      <div class="logo">M</div>
+      <img src="assets/musashi-logo.png" alt="Musashi" class="logo-img" />
       <div>
         <h1>MAP-IN Translator <span style="color:#e8622c">V1.0</span></h1>
         <p>Penerjemah suara real-time dua arah — PT Musashi Autoparts Indonesia</p>
@@ -26,10 +26,17 @@
 
   <section class="controls-card">
     <div class="field">
+      <label>Mode Perangkat</label>
+      <div class="pill-toggle" id="deviceModeToggle">
+        <button data-devicemode="single" class="active">1 HP (2 Headset)</button>
+        <button data-devicemode="dual">Grup Multi-HP (2–5 Pembicara)</button>
+      </div>
+    </div>
+    <div class="field" id="langAField">
       <label>Bahasa Pembicara A (Panel Kiri)</label>
       <select id="langA"></select>
     </div>
-    <div class="field">
+    <div class="field" id="langBField">
       <label>Bahasa Pembicara B (Panel Kanan)</label>
       <select id="langB"></select>
     </div>
@@ -58,10 +65,68 @@
     </div>
   </section>
 
-  <section class="panels">
+  <section class="controls-card" id="dualSessionCard" style="display:none;">
+    <div class="field">
+      <label>Nama Saya</label>
+      <input type="text" id="myNameInput" placeholder="Mis: Budi" style="max-width:130px;" />
+    </div>
+    <div class="field">
+      <label>Bahasa Saya</label>
+      <select id="myLangSelect"></select>
+    </div>
+    <div class="field">
+      <label>Nama Ruangan (untuk buat baru)</label>
+      <input type="text" id="roomNameInput" placeholder="Mis: Meeting Klien Jepang" style="max-width:170px;" />
+    </div>
+    <div class="field">
+      <label>PIN Ruangan (opsional)</label>
+      <input type="text" id="roomPinInput" placeholder="Mis: 2468" maxlength="8" style="max-width:100px;" />
+    </div>
+    <div class="field">
+      <label>Kode Ruangan (untuk gabung)</label>
+      <input type="text" id="sessionCodeInput" placeholder="Contoh: AB3D9" style="text-transform:uppercase;max-width:110px;" />
+    </div>
+    <div class="field">
+      <label>&nbsp;</label>
+      <label style="display:flex;align-items:center;gap:6px;font-weight:500;font-size:13px;color:var(--muted);cursor:pointer;">
+        <input type="checkbox" id="roomPublicCheckbox" style="width:auto;" />
+        Tampilkan di daftar publik
+      </label>
+    </div>
+    <div class="field" style="width:100%;">
+      <label>&nbsp;</label>
+      <div class="mode-row">
+        <button class="btn btn-secondary" id="btnCreateSession">🆕 Buat Ruangan Baru</button>
+        <button class="btn btn-secondary" id="btnJoinSession">🔗 Gabung Ruangan</button>
+        <button class="btn btn-ghost" id="btnListRooms">🔎 Lihat Ruangan Aktif</button>
+        <button class="btn btn-danger" id="btnLockRoom" style="display:none;">🔒 Kunci Ruangan</button>
+      </div>
+    </div>
+    <div class="field">
+      <label>Status</label>
+      <span class="status-pill" id="sessionStatus"><span class="dot" id="sessionDot"></span> <span id="sessionStatusText">Belum tersambung</span></span>
+    </div>
+    <div class="field" style="width:100%;">
+      <label>Peserta di Ruangan Ini</label>
+      <div id="participantsList" style="display:flex;gap:8px;flex-wrap:wrap;"></div>
+    </div>
+    <div class="small-note" style="max-width:100%;width:100%;">
+      Ruangan ini bekerja seperti <strong>Meeting ID + Passcode</strong> di Zoom: setiap kode ruangan sepenuhnya
+      <strong>terpisah</strong> dari ruangan lain, dan secara <strong>default TIDAK muncul</strong> di daftar publik
+      kecuali dicentang. Isi <strong>PIN</strong> kalau mau proteksi ekstra selain kode. Host (pembuat ruangan) bisa
+      klik <strong>🔒 Kunci Ruangan</strong> kapan saja supaya tidak ada peserta baru masuk lagi, meski kode/PIN
+      bocor ke orang lain. Satu orang klik <strong>Buat Ruangan Baru</strong>, bagikan kode (dan PIN bila diisi) ke
+      1–4 rekan lain (maks. 5 peserta/ruangan) lewat jalur terpisah (chat/lisan) — bukan lewat aplikasi ini. Yang
+      lain isi nama & bahasa, masukkan kode (+PIN jika ada), klik <strong>Gabung Ruangan</strong>. Setiap HP
+      <strong>hanya menampilkan &amp; menyuarakan terjemahan ke bahasa milik sendiri</strong>. Mode ini butuh
+      backend Apps Script aktif — atur di ⚙️ Pengaturan → Produksi (Apps Script) terlebih dulu.
+    </div>
+  </section>
+
+  <section class="panels" id="classicPanels">
     <div class="panel left" id="panelA">
       <div class="panel-header">
-        <h2>Pembicara A</h2>
+        <input type="text" class="speaker-name-input" id="nameA" placeholder="Pembicara A" maxlength="30" />
         <span class="lang-tag" id="langATag">Bahasa Indonesia</span>
       </div>
       <div class="transcript" id="transcriptA"></div>
@@ -74,7 +139,7 @@
 
     <div class="panel right" id="panelB">
       <div class="panel-header">
-        <h2>Pembicara B</h2>
+        <input type="text" class="speaker-name-input" id="nameB" placeholder="Pembicara B" maxlength="30" />
         <span class="lang-tag" id="langBTag">Bahasa Jepang</span>
       </div>
       <div class="transcript" id="transcriptB"></div>
@@ -83,6 +148,19 @@
         <div class="mic-live-text" id="liveB"></div>
         <div class="mic-hint">Tahan tombol untuk bicara (Push-to-Talk)</div>
       </div>
+    </div>
+  </section>
+
+  <section class="panel" id="groupPanel" style="display:none;min-height:480px;">
+    <div class="panel-header" style="background:var(--orange-light);">
+      <h2 id="groupPanelTitle">💬 Percakapan Grup</h2>
+      <span class="lang-tag" id="myLangTag">Bahasa Saya: -</span>
+    </div>
+    <div class="transcript" id="transcriptGroup"></div>
+    <div class="mic-row">
+      <button class="mic-btn" id="micGroup">🎤</button>
+      <div class="mic-live-text" id="liveGroup"></div>
+      <div class="mic-hint">Tahan tombol untuk bicara (Push-to-Talk) — bicara dalam bahasa Anda sendiri</div>
     </div>
   </section>
 
@@ -118,6 +196,17 @@
     </div>
     <button class="btn btn-primary" id="btnSaveSettings">Simpan Pengaturan</button>
     <p class="small-note" style="margin-top:14px;">Lihat file <code>backend/Code.gs</code> dan <code>DEPLOY_GUIDE.md</code> untuk cara deploy backend Apps Script Anda sendiri.</p>
+  </div>
+</div>
+
+<!-- Room List Modal -->
+<div class="modal-overlay" id="roomsModal">
+  <div class="modal">
+    <button class="close-x" data-close="roomsModal">✕</button>
+    <h3>🔎 Ruangan Aktif Saat Ini</h3>
+    <p class="small-note">Setiap ruangan berjalan independen — pilih salah satu untuk bergabung. Isi dulu Nama & Bahasa Saya sebelum bergabung.</p>
+    <div id="roomsList" style="display:flex;flex-direction:column;gap:8px;margin-top:10px;"></div>
+    <p class="small-note" id="roomsEmptyNote" style="display:none;">Belum ada ruangan aktif. Jadilah yang pertama membuat ruangan baru.</p>
   </div>
 </div>
 
