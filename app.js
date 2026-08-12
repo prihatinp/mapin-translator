@@ -1061,6 +1061,17 @@ function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTransc
   // terputus dan terkirim sebelum selesai. Baru dikirim saat tombol
   // benar-benar dilepas (lihat stop()).
   let pttBuffer = "";
+  // Watchdog: sebagian browser (terutama untuk ucapan yang agak panjang)
+  // punya bug dikenal di mode continuous — sesi rekognisi bisa diam-diam
+  // "macet" tanpa memicu onend/onerror sama sekali, jadi mic terlihat
+  // masih aktif tapi sebenarnya tidak merekam apa pun lagi (persis keluhan
+  // "nge-lag diam saja, gak ada warning"). lastActivityAt dicatat tiap kali
+  // ada hasil interim/final; kalau lama tidak ada aktivitas SAMA SEKALI
+  // selagi tombol masih ditahan, paksa sambung ulang otomatis + tampilkan
+  // catatan kecil supaya tidak terkesan diam total.
+  let lastActivityAt = 0;
+  let watchdogTimer = null;
+  const IDLE_RESTART_MS = 8000;
 
   async function handleFinalText(text, sourceLangOverride) {
     $(liveTextId).textContent = "";
@@ -1084,18 +1095,31 @@ function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTransc
     }
   }
 
-  function start() {
-    if (!state.sessionActive) { alert("Tekan 'Mulai Sesi' terlebih dahulu."); return; }
+  function showTransientNote(msg) {
+    const el = $(liveTextId);
+    const prev = el.textContent;
+    el.textContent = msg;
+    setTimeout(() => { if (el.textContent === msg) el.textContent = prev; }, 1500);
+  }
+
+  // Memulai (atau menyambung ulang) SATU sesi SpeechRecognition. Dipisah
+  // dari start() supaya sambung-ulang otomatis (dari onend maupun
+  // watchdog) TIDAK mengosongkan pttBuffer yang sudah terkumpul.
+  function beginRecognition() {
     const isPtt = state.mode === "ptt";
     let lang = getMyLang();
-    pttBuffer = "";
-    recognizer = createRecognizer(langByCode(lang).stt, {
+    lastActivityAt = Date.now();
+    let thisRec = createRecognizer(langByCode(lang).stt, {
       // Selalu continuous:true supaya browser TIDAK menganggap sesi selesai
       // hanya karena ada jeda hening singkat — ini penyebab utama mic
       // "terputus sendiri" & kalimat terkirim sebelum selesai bicara.
       continuous: true,
-      onInterim: (t) => $(liveTextId).textContent = isPtt ? (pttBuffer ? pttBuffer + " " + t : t) : t,
+      onInterim: (t) => {
+        lastActivityAt = Date.now();
+        $(liveTextId).textContent = isPtt ? (pttBuffer ? pttBuffer + " " + t : t) : t;
+      },
       onFinal: (t) => {
+        lastActivityAt = Date.now();
         if (isPtt) {
           // PTT: kumpulkan dulu, JANGAN kirim — dikirim nanti saat tombol dilepas
           pttBuffer = pttBuffer ? (pttBuffer + " " + t) : t;
@@ -1109,28 +1133,58 @@ function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTransc
       onEnd: () => {
         listening = false;
         setMicListening(micBtnId, false);
+        if (recognizer !== thisRec) return; // event basi dari instance lama yang sudah digantikan (mis. oleh watchdog) — abaikan
         // Browser kadang menghentikan sesi rekognisi sendiri walau sudah
         // diminta continuous:true (mis. jeda hening cukup lama). Selama
         // tombol PTT masih ditahan (atau mode hands-free masih aktif),
         // sambung lagi otomatis secara diam-diam.
-        if (state.sessionActive && recognizer && recognizer.__shouldRestart) {
-          try { recognizer.start(); listening = true; setMicListening(micBtnId, true); } catch {}
+        if (state.sessionActive && thisRec.__shouldRestart) {
+          try { beginRecognition(); listening = true; setMicListening(micBtnId, true); } catch {}
         }
       },
       onError: (e) => {
         console.warn("STT error", e.error);
-        if (e.error === "not-allowed") alert("Izin microphone ditolak. Aktifkan izin microphone di browser Anda.");
+        if (e.error === "not-allowed") {
+          alert("Izin microphone ditolak. Aktifkan izin microphone di browser Anda.");
+        } else if (listening) {
+          showTransientNote("🔄 gangguan mic (" + e.error + "), menyambungkan ulang...");
+        }
       }
     });
-    if (!recognizer) return;
-    recognizer.__shouldRestart = true;
+    if (!thisRec) return false;
+    recognizer = thisRec;
+    thisRec.__shouldRestart = true;
+    try { thisRec.start(); } catch (e) { console.warn(e); return false; }
+    return true;
+  }
+
+  function start() {
+    if (!state.sessionActive) { alert("Tekan 'Mulai Sesi' terlebih dahulu."); return; }
+    pttBuffer = "";
+    if (!beginRecognition()) return;
     listening = true;
     setMicListening(micBtnId, true);
-    try { recognizer.start(); } catch (e) { console.warn(e); }
+    if (watchdogTimer) clearInterval(watchdogTimer);
+    watchdogTimer = setInterval(() => {
+      if (!listening) return;
+      const idleMs = Date.now() - lastActivityAt;
+      if (idleMs > IDLE_RESTART_MS) {
+        console.warn("Mic idle " + Math.round(idleMs / 1000) + "s tanpa aktivitas — menyambungkan ulang otomatis.");
+        showTransientNote("🔄 mic tidak merespons, menyambungkan ulang...");
+        if (recognizer) {
+          recognizer.__shouldRestart = false; // instance lama, jangan biarkan onend-nya ikut memicu restart kedua
+          try { recognizer.abort ? recognizer.abort() : recognizer.stop(); } catch {}
+        }
+        beginRecognition();
+        listening = true;
+        setMicListening(micBtnId, true);
+      }
+    }, 2000);
   }
 
   function stop() {
     listening = false;
+    if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
     if (recognizer) {
       recognizer.__shouldRestart = false;
       try { recognizer.stop(); } catch {}
@@ -1184,21 +1238,34 @@ function initGroupMic() {
   // tidak membuat kalimat terpotong & terkirim sebelum selesai.
   let pttBuffer = "";
 
+  let lastActivityAt = 0;
+  let watchdogTimer = null;
+  const IDLE_RESTART_MS = 8000;
+
   async function handleFinalText(text) {
     $("liveGroup").textContent = "";
     addBubble("transcriptGroup", text, null, (state.myName || "Saya") + " (saya, asli)");
     sendToGroupSession(text);
   }
 
-  function start() {
-    if (!state.sessionActive) { alert("Tekan 'Mulai Sesi' terlebih dahulu."); return; }
-    if (!state.sessionConnected) { alert("Gabung/buat sesi grup terlebih dahulu."); return; }
+  function showTransientNote(msg) {
+    const el = $("liveGroup");
+    const prev = el.textContent;
+    el.textContent = msg;
+    setTimeout(() => { if (el.textContent === msg) el.textContent = prev; }, 1500);
+  }
+
+  function beginRecognition() {
     const isPtt = state.mode === "ptt";
-    pttBuffer = "";
-    recognizer = createRecognizer(langByCode(state.myLang).stt, {
+    lastActivityAt = Date.now();
+    let thisRec = createRecognizer(langByCode(state.myLang).stt, {
       continuous: true,
-      onInterim: (t) => $("liveGroup").textContent = isPtt ? (pttBuffer ? pttBuffer + " " + t : t) : t,
+      onInterim: (t) => {
+        lastActivityAt = Date.now();
+        $("liveGroup").textContent = isPtt ? (pttBuffer ? pttBuffer + " " + t : t) : t;
+      },
       onFinal: (t) => {
+        lastActivityAt = Date.now();
         if (isPtt) {
           pttBuffer = pttBuffer ? (pttBuffer + " " + t) : t;
           $("liveGroup").textContent = pttBuffer;
@@ -1209,24 +1276,55 @@ function initGroupMic() {
       onEnd: () => {
         listening = false;
         setMicListening("micGroup", false);
-        if (state.sessionActive && recognizer && recognizer.__shouldRestart) {
-          try { recognizer.start(); listening = true; setMicListening("micGroup", true); } catch {}
+        if (recognizer !== thisRec) return; // event basi dari instance lama — abaikan
+        if (state.sessionActive && thisRec.__shouldRestart) {
+          try { beginRecognition(); listening = true; setMicListening("micGroup", true); } catch {}
         }
       },
       onError: (e) => {
         console.warn("STT error", e.error);
-        if (e.error === "not-allowed") alert("Izin microphone ditolak. Aktifkan izin microphone di browser Anda.");
+        if (e.error === "not-allowed") {
+          alert("Izin microphone ditolak. Aktifkan izin microphone di browser Anda.");
+        } else if (listening) {
+          showTransientNote("🔄 gangguan mic (" + e.error + "), menyambungkan ulang...");
+        }
       }
     });
-    if (!recognizer) return;
-    recognizer.__shouldRestart = true;
+    if (!thisRec) return false;
+    recognizer = thisRec;
+    thisRec.__shouldRestart = true;
+    try { thisRec.start(); } catch (e) { console.warn(e); return false; }
+    return true;
+  }
+
+  function start() {
+    if (!state.sessionActive) { alert("Tekan 'Mulai Sesi' terlebih dahulu."); return; }
+    if (!state.sessionConnected) { alert("Gabung/buat sesi grup terlebih dahulu."); return; }
+    pttBuffer = "";
+    if (!beginRecognition()) return;
     listening = true;
     setMicListening("micGroup", true);
-    try { recognizer.start(); } catch (e) { console.warn(e); }
+    if (watchdogTimer) clearInterval(watchdogTimer);
+    watchdogTimer = setInterval(() => {
+      if (!listening) return;
+      const idleMs = Date.now() - lastActivityAt;
+      if (idleMs > IDLE_RESTART_MS) {
+        console.warn("Mic idle " + Math.round(idleMs / 1000) + "s tanpa aktivitas — menyambungkan ulang otomatis.");
+        showTransientNote("🔄 mic tidak merespons, menyambungkan ulang...");
+        if (recognizer) {
+          recognizer.__shouldRestart = false;
+          try { recognizer.abort ? recognizer.abort() : recognizer.stop(); } catch {}
+        }
+        beginRecognition();
+        listening = true;
+        setMicListening("micGroup", true);
+      }
+    }, 2000);
   }
 
   function stop() {
     listening = false;
+    if (watchdogTimer) { clearInterval(watchdogTimer); watchdogTimer = null; }
     if (recognizer) { recognizer.__shouldRestart = false; try { recognizer.stop(); } catch {} }
     setMicListening("micGroup", false);
     $("liveGroup").textContent = "";
