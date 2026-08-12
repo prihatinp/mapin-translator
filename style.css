@@ -124,6 +124,13 @@ select, input[type=text], input[type=password]{
   display:flex;flex-direction:column;
   overflow:hidden;
   min-height:420px;
+  /* Batasi tinggi maksimum supaya panel TIDAK ikut memanjang seiring
+     bertambahnya pesan — .transcript di dalamnya (flex:1;overflow-y:auto)
+     baru bisa scroll sendiri kalau induknya (.panel) punya batas tinggi.
+     Tanpa ini, tombol mic ikut terdorong turun terus dan pengguna harus
+     scroll seluruh halaman untuk mencapainya (terutama di PC/layar besar
+     dengan percakapan panjang). */
+  max-height:min(640px, 65vh);
 }
 .panel-header{
   padding:16px 20px;

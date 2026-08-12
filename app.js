@@ -613,6 +613,36 @@ async function fbDelete(path) {
   const res = await fetch(fbUrl(path), { method: "DELETE" });
   if (!res.ok) throw new Error("Firebase error (status " + res.status + ")");
 }
+// Versi "fire-and-forget" pakai fetch keepalive — dipakai khusus saat
+// tab/app ditutup (beforeunload/pagehide), supaya permintaan hapus tetap
+// sempat terkirim ke Firebase walau halaman sedang dalam proses menutup
+// dan tidak sempat menunggu respons.
+function fbDeleteBeacon_(path) {
+  try { fetch(fbUrl(path), { method: "DELETE", keepalive: true }); } catch {}
+}
+
+// Bersihkan ruangan dari Firebase saat sesi berakhir, supaya database tidak
+// menumpuk ruangan yang sudah tidak dipakai (Firebase Spark tidak punya
+// cron/Cloud Functions bawaan untuk auto-hapus seperti CacheService di
+// Apps Script). Host yang mengakhiri sesi akan menghapus SELURUH ruangan
+// (termasuk entri daftar publik); peserta biasa hanya menghapus dirinya
+// sendiri dari daftar peserta supaya ruangan tetap ada untuk yang lain.
+// useBeacon=true dipakai saat tab/app benar-benar ditutup — lihat
+// fbDeleteBeacon_ di atas.
+function cleanupFirebaseRoomOnExit_(useBeacon) {
+  if (state.backend !== "firebase" || !state.sessionConnected || !state.sessionCode) return;
+  const del = useBeacon
+    ? (path) => fbDeleteBeacon_(path)
+    : (path) => fbDelete(path).catch(() => {});
+  if (state.isHost) {
+    del("/rooms/" + state.sessionCode);
+    del("/publicRooms/" + state.sessionCode);
+  } else if (state.participantId) {
+    del("/rooms/" + state.sessionCode + "/participants/" + state.participantId);
+  }
+}
+window.addEventListener("beforeunload", () => cleanupFirebaseRoomOnExit_(true));
+window.addEventListener("pagehide", () => cleanupFirebaseRoomOnExit_(true));
 
 function randomCode_(len) {
   const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // tanpa 0/O/1/I biar tidak salah baca
@@ -1055,6 +1085,38 @@ function createRecognizer(langStt, { continuous = false, onInterim, onFinal, onE
 function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTranscriptId, getMyLang, getOtherLang, getSpeakerLabel }) {
   let recognizer = null;
   let listening = false;
+  // Mode Tekan-untuk-Bicara (PTT): teks yang sudah "final" menurut browser
+  // ditampung dulu di sini, TIDAK langsung dikirim — supaya jeda hening
+  // sesaat di tengah bicara (mis. mikir sebentar) tidak membuat kalimat
+  // terputus dan terkirim sebelum selesai. Baru dikirim saat tombol
+  // benar-benar dilepas (lihat stop()).
+  //
+  // CATATAN DESAIN (setelah beberapa putaran percobaan): sempat dicoba
+  // continuous:true + watchdog paksa-sambung-ulang untuk menjaga sesi tetap
+  // hidup melewati jeda hening. Di device nyata itu malah bikin mic sering
+  // berhenti-sambung sendiri dan terasa kacau — continuous:true memang
+  // dikenal kurang stabil di banyak implementasi Chrome/Android. Solusi
+  // yang dipakai sekarang JUSTRU sebaliknya: tetap pakai continuous:false
+  // (perilaku bawaan browser yang paling stabil — satu sesi berhenti wajar
+  // setiap kali browser mendeteksi akhir satu ucapan), TAPI begitu browser
+  // menghentikan sesi itu (onEnd) sementara tombol masih ditahan, langsung
+  // buka sesi BARU secara mulus untuk menangkap ucapan berikutnya. Hasilnya
+  // sama-sama tidak pernah kirim di tengah jeda, tanpa keharusan memaksa
+  // mode continuous yang rawan macet.
+  let pttBuffer = "";
+  // Sebagai jaga-jaga tambahan: kalau ada teks yang masih "interim" (belum
+  // sempat ditandai final) tepat saat sesi berhenti/tombol dilepas, teks
+  // itu tetap diikutkan — supaya ucapan pendek yang browser-nya lambat
+  // memfinalisasi tidak hilang begitu saja.
+  let lastInterimText = "";
+
+  function flushInterimToBuffer() {
+    const t = lastInterimText.trim();
+    if (t) {
+      pttBuffer = pttBuffer ? (pttBuffer + " " + t) : t;
+      lastInterimText = "";
+    }
+  }
 
   async function handleFinalText(text, sourceLangOverride) {
     $(liveTextId).textContent = "";
@@ -1078,25 +1140,44 @@ function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTransc
     }
   }
 
-  function start(continuous) {
-    if (!state.sessionActive) { alert("Tekan 'Mulai Sesi' terlebih dahulu."); return; }
+  // Memulai (atau menyambung ulang secara mulus) SATU sesi SpeechRecognition.
+  // Dipisah dari start() supaya sambung-ulang otomatis di onEnd TIDAK
+  // mengosongkan pttBuffer yang sudah terkumpul dari ucapan sebelumnya.
+  function beginRecognition() {
+    const isPtt = state.mode === "ptt";
     let lang = getMyLang();
-    recognizer = createRecognizer(langByCode(lang).stt, {
-      continuous,
-      onInterim: (t) => $(liveTextId).textContent = t,
+    let thisRec = createRecognizer(langByCode(lang).stt, {
+      continuous: false,
+      onInterim: (t) => {
+        if (isPtt) lastInterimText = t;
+        $(liveTextId).textContent = isPtt ? (pttBuffer ? pttBuffer + " " + t : t) : t;
+      },
       onFinal: (t) => {
-        let detectedLang = null;
-        if (state.mode === "auto" || state.mode === "meeting") {
-          detectedLang = detectScript(t);
+        if (isPtt) {
+          // PTT: kumpulkan dulu, JANGAN kirim — dikirim nanti saat tombol dilepas
+          lastInterimText = "";
+          pttBuffer = pttBuffer ? (pttBuffer + " " + t) : t;
+          $(liveTextId).textContent = pttBuffer;
+        } else {
+          let detectedLang = null;
+          if (state.mode === "auto" || state.mode === "meeting") detectedLang = detectScript(t);
+          handleFinalText(t, detectedLang);
         }
-        handleFinalText(t, detectedLang);
-        if (!continuous) stop();
       },
       onEnd: () => {
+        if (recognizer !== thisRec) return; // event basi dari instance lama — abaikan
         listening = false;
         setMicListening(micBtnId, false);
-        if (continuous && state.sessionActive && recognizer && recognizer.__shouldRestart) {
-          try { recognizer.start(); } catch {}
+        if (isPtt) flushInterimToBuffer(); // jangan sampai teks yang belum "final" hilang sebelum sesi baru dibuka
+        // Browser menghentikan sesi ini secara wajar setelah satu ucapan
+        // selesai (perilaku bawaan continuous:false). Selama tombol PTT
+        // masih ditahan (atau mode hands-free masih aktif), langsung buka
+        // sesi baru tanpa jeda — perilaku standar, tanpa timer tambahan.
+        if (state.sessionActive && thisRec.__shouldRestart) {
+          if (beginRecognition()) {
+            listening = true;
+            setMicListening(micBtnId, true);
+          }
         }
       },
       onError: (e) => {
@@ -1104,11 +1185,20 @@ function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTransc
         if (e.error === "not-allowed") alert("Izin microphone ditolak. Aktifkan izin microphone di browser Anda.");
       }
     });
-    if (!recognizer) return;
-    recognizer.__shouldRestart = continuous;
+    if (!thisRec) return false;
+    recognizer = thisRec;
+    thisRec.__shouldRestart = true;
+    try { thisRec.start(); } catch (e) { console.warn(e); return false; }
+    return true;
+  }
+
+  function start() {
+    if (!state.sessionActive) { alert("Tekan 'Mulai Sesi' terlebih dahulu."); return; }
+    pttBuffer = "";
+    lastInterimText = "";
+    if (!beginRecognition()) return;
     listening = true;
     setMicListening(micBtnId, true);
-    try { recognizer.start(); } catch (e) { console.warn(e); }
   }
 
   function stop() {
@@ -1119,17 +1209,29 @@ function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTransc
     }
     setMicListening(micBtnId, false);
     $(liveTextId).textContent = "";
+    // PTT: kirim SEKARANG, tepat saat tombol dilepas — gabungkan semua yang
+    // sudah "final" (pttBuffer) DAN sisa teks yang masih "interim" saat
+    // tombol dilepas, supaya ucapan pendek yang belum sempat difinalisasi
+    // browser tetap ikut terkirim.
+    if (state.mode === "ptt") {
+      flushInterimToBuffer();
+      if (pttBuffer.trim()) {
+        const text = pttBuffer.trim();
+        pttBuffer = "";
+        handleFinalText(text);
+      }
+    }
   }
 
   const btn = $(micBtnId);
-  btn.addEventListener("mousedown", () => { if (state.mode === "ptt") start(false); });
+  btn.addEventListener("mousedown", () => { if (state.mode === "ptt") start(); });
   btn.addEventListener("mouseup", () => { if (state.mode === "ptt") stop(); });
   btn.addEventListener("mouseleave", () => { if (state.mode === "ptt" && listening) stop(); });
-  btn.addEventListener("touchstart", (e) => { e.preventDefault(); if (state.mode === "ptt") start(false); });
+  btn.addEventListener("touchstart", (e) => { e.preventDefault(); if (state.mode === "ptt") start(); });
   btn.addEventListener("touchend", (e) => { e.preventDefault(); if (state.mode === "ptt") stop(); });
   btn.addEventListener("click", () => {
     if (state.mode === "ptt") return;
-    if (listening) stop(); else start(true);
+    if (listening) stop(); else start();
   });
 
   return { stop };
@@ -1153,6 +1255,23 @@ let groupMic = null;
 function initGroupMic() {
   let recognizer = null;
   let listening = false;
+  // Sama seperti mode 1-HP: tampung dulu teks final selama tombol PTT
+  // ditahan, baru kirim saat dilepas — supaya jeda hening di tengah bicara
+  // tidak membuat kalimat terpotong & terkirim sebelum selesai.
+  let pttBuffer = "";
+  // Lihat catatan panjang di makeSpeakerController: sebagian browser tidak
+  // pernah menandai ucapan pendek sebagai "final" sama sekali di mode
+  // continuous — jadi teks interim TERAKHIR juga disimpan supaya tidak
+  // hilang begitu saja saat tombol dilepas.
+  let lastInterimText = "";
+
+  function flushInterimToBuffer() {
+    const t = lastInterimText.trim();
+    if (t) {
+      pttBuffer = pttBuffer ? (pttBuffer + " " + t) : t;
+      lastInterimText = "";
+    }
+  }
 
   async function handleFinalText(text) {
     $("liveGroup").textContent = "";
@@ -1160,18 +1279,39 @@ function initGroupMic() {
     sendToGroupSession(text);
   }
 
-  function start(continuous) {
-    if (!state.sessionActive) { alert("Tekan 'Mulai Sesi' terlebih dahulu."); return; }
-    if (!state.sessionConnected) { alert("Gabung/buat sesi grup terlebih dahulu."); return; }
-    recognizer = createRecognizer(langByCode(state.myLang).stt, {
-      continuous,
-      onInterim: (t) => $("liveGroup").textContent = t,
-      onFinal: (t) => { handleFinalText(t); if (!continuous) stop(); },
+  // Lihat catatan desain di makeSpeakerController: continuous:false + buka
+  // sesi baru begitu onEnd terjadi (selama tombol masih ditahan) terbukti
+  // jauh lebih stabil di device nyata dibanding memaksa continuous:true.
+  function beginRecognition() {
+    const isPtt = state.mode === "ptt";
+    let thisRec = createRecognizer(langByCode(state.myLang).stt, {
+      continuous: false,
+      onInterim: (t) => {
+        if (isPtt) lastInterimText = t;
+        $("liveGroup").textContent = isPtt ? (pttBuffer ? pttBuffer + " " + t : t) : t;
+      },
+      onFinal: (t) => {
+        if (isPtt) {
+          lastInterimText = "";
+          pttBuffer = pttBuffer ? (pttBuffer + " " + t) : t;
+          $("liveGroup").textContent = pttBuffer;
+        } else {
+          handleFinalText(t);
+        }
+      },
       onEnd: () => {
+        if (recognizer !== thisRec) return; // event basi dari instance lama — abaikan
         listening = false;
         setMicListening("micGroup", false);
-        if (continuous && state.sessionActive && recognizer && recognizer.__shouldRestart) {
-          try { recognizer.start(); } catch {}
+        if (isPtt) flushInterimToBuffer();
+        // Langsung buka sesi baru begitu browser menghentikan sesi ini
+        // secara wajar (selama tombol masih ditahan) — tanpa jeda/timer
+        // tambahan, sesuai perilaku standar continuous:false.
+        if (state.sessionActive && thisRec.__shouldRestart) {
+          if (beginRecognition()) {
+            listening = true;
+            setMicListening("micGroup", true);
+          }
         }
       },
       onError: (e) => {
@@ -1179,11 +1319,21 @@ function initGroupMic() {
         if (e.error === "not-allowed") alert("Izin microphone ditolak. Aktifkan izin microphone di browser Anda.");
       }
     });
-    if (!recognizer) return;
-    recognizer.__shouldRestart = continuous;
+    if (!thisRec) return false;
+    recognizer = thisRec;
+    thisRec.__shouldRestart = true;
+    try { thisRec.start(); } catch (e) { console.warn(e); return false; }
+    return true;
+  }
+
+  function start() {
+    if (!state.sessionActive) { alert("Tekan 'Mulai Sesi' terlebih dahulu."); return; }
+    if (!state.sessionConnected) { alert("Gabung/buat sesi grup terlebih dahulu."); return; }
+    pttBuffer = "";
+    lastInterimText = "";
+    if (!beginRecognition()) return;
     listening = true;
     setMicListening("micGroup", true);
-    try { recognizer.start(); } catch (e) { console.warn(e); }
   }
 
   function stop() {
@@ -1191,17 +1341,25 @@ function initGroupMic() {
     if (recognizer) { recognizer.__shouldRestart = false; try { recognizer.stop(); } catch {} }
     setMicListening("micGroup", false);
     $("liveGroup").textContent = "";
+    if (state.mode === "ptt") {
+      flushInterimToBuffer();
+      if (pttBuffer.trim()) {
+        const text = pttBuffer.trim();
+        pttBuffer = "";
+        handleFinalText(text);
+      }
+    }
   }
 
   const btn = $("micGroup");
-  btn.addEventListener("mousedown", () => { if (state.mode === "ptt") start(false); });
+  btn.addEventListener("mousedown", () => { if (state.mode === "ptt") start(); });
   btn.addEventListener("mouseup", () => { if (state.mode === "ptt") stop(); });
   btn.addEventListener("mouseleave", () => { if (state.mode === "ptt" && listening) stop(); });
-  btn.addEventListener("touchstart", (e) => { e.preventDefault(); if (state.mode === "ptt") start(false); });
+  btn.addEventListener("touchstart", (e) => { e.preventDefault(); if (state.mode === "ptt") start(); });
   btn.addEventListener("touchend", (e) => { e.preventDefault(); if (state.mode === "ptt") stop(); });
   btn.addEventListener("click", () => {
     if (state.mode === "ptt") return;
-    if (listening) stop(); else start(true);
+    if (listening) stop(); else start();
   });
 
   return { stop };
@@ -1227,6 +1385,15 @@ $("btnStop").addEventListener("click", () => {
   $("btnStop").disabled = true;
   if (state.deviceMode === "dual") {
     addBubble("transcriptGroup", "— Sesi selesai —", null, "Sistem");
+    if (state.backend === "firebase" && state.sessionConnected) {
+      cleanupFirebaseRoomOnExit_(false); // hapus ruangan (host) / keluar dari ruangan (peserta) di Firebase
+      stopPolling();
+      state.sessionConnected = false;
+      state.isHost = false;
+      state.roomLocked = false;
+      setSessionStatus("Ruangan dihapus dari database — sesi selesai.", "");
+      updateLockButton();
+    }
   } else {
     addBubble("transcriptA", "— Sesi selesai —", null, "Sistem");
     addBubble("transcriptB", "— Sesi selesai —", null, "Sistem");
