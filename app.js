@@ -1055,6 +1055,12 @@ function createRecognizer(langStt, { continuous = false, onInterim, onFinal, onE
 function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTranscriptId, getMyLang, getOtherLang, getSpeakerLabel }) {
   let recognizer = null;
   let listening = false;
+  // Mode Tekan-untuk-Bicara (PTT): teks yang sudah "final" menurut browser
+  // ditampung dulu di sini, TIDAK langsung dikirim — supaya jeda hening
+  // sesaat di tengah bicara (mis. mikir sebentar) tidak membuat kalimat
+  // terputus dan terkirim sebelum selesai. Baru dikirim saat tombol
+  // benar-benar dilepas (lihat stop()).
+  let pttBuffer = "";
 
   async function handleFinalText(text, sourceLangOverride) {
     $(liveTextId).textContent = "";
@@ -1078,25 +1084,37 @@ function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTransc
     }
   }
 
-  function start(continuous) {
+  function start() {
     if (!state.sessionActive) { alert("Tekan 'Mulai Sesi' terlebih dahulu."); return; }
+    const isPtt = state.mode === "ptt";
     let lang = getMyLang();
+    pttBuffer = "";
     recognizer = createRecognizer(langByCode(lang).stt, {
-      continuous,
-      onInterim: (t) => $(liveTextId).textContent = t,
+      // Selalu continuous:true supaya browser TIDAK menganggap sesi selesai
+      // hanya karena ada jeda hening singkat — ini penyebab utama mic
+      // "terputus sendiri" & kalimat terkirim sebelum selesai bicara.
+      continuous: true,
+      onInterim: (t) => $(liveTextId).textContent = isPtt ? (pttBuffer ? pttBuffer + " " + t : t) : t,
       onFinal: (t) => {
-        let detectedLang = null;
-        if (state.mode === "auto" || state.mode === "meeting") {
-          detectedLang = detectScript(t);
+        if (isPtt) {
+          // PTT: kumpulkan dulu, JANGAN kirim — dikirim nanti saat tombol dilepas
+          pttBuffer = pttBuffer ? (pttBuffer + " " + t) : t;
+          $(liveTextId).textContent = pttBuffer;
+        } else {
+          let detectedLang = null;
+          if (state.mode === "auto" || state.mode === "meeting") detectedLang = detectScript(t);
+          handleFinalText(t, detectedLang);
         }
-        handleFinalText(t, detectedLang);
-        if (!continuous) stop();
       },
       onEnd: () => {
         listening = false;
         setMicListening(micBtnId, false);
-        if (continuous && state.sessionActive && recognizer && recognizer.__shouldRestart) {
-          try { recognizer.start(); } catch {}
+        // Browser kadang menghentikan sesi rekognisi sendiri walau sudah
+        // diminta continuous:true (mis. jeda hening cukup lama). Selama
+        // tombol PTT masih ditahan (atau mode hands-free masih aktif),
+        // sambung lagi otomatis secara diam-diam.
+        if (state.sessionActive && recognizer && recognizer.__shouldRestart) {
+          try { recognizer.start(); listening = true; setMicListening(micBtnId, true); } catch {}
         }
       },
       onError: (e) => {
@@ -1105,7 +1123,7 @@ function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTransc
       }
     });
     if (!recognizer) return;
-    recognizer.__shouldRestart = continuous;
+    recognizer.__shouldRestart = true;
     listening = true;
     setMicListening(micBtnId, true);
     try { recognizer.start(); } catch (e) { console.warn(e); }
@@ -1119,17 +1137,25 @@ function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTransc
     }
     setMicListening(micBtnId, false);
     $(liveTextId).textContent = "";
+    // PTT: kirim SEKARANG, tepat saat tombol dilepas — mengumpulkan seluruh
+    // kalimat yang terkumpul selama tombol ditahan (termasuk yang melewati
+    // jeda hening di tengah-tengah).
+    if (state.mode === "ptt" && pttBuffer.trim()) {
+      const text = pttBuffer.trim();
+      pttBuffer = "";
+      handleFinalText(text);
+    }
   }
 
   const btn = $(micBtnId);
-  btn.addEventListener("mousedown", () => { if (state.mode === "ptt") start(false); });
+  btn.addEventListener("mousedown", () => { if (state.mode === "ptt") start(); });
   btn.addEventListener("mouseup", () => { if (state.mode === "ptt") stop(); });
   btn.addEventListener("mouseleave", () => { if (state.mode === "ptt" && listening) stop(); });
-  btn.addEventListener("touchstart", (e) => { e.preventDefault(); if (state.mode === "ptt") start(false); });
+  btn.addEventListener("touchstart", (e) => { e.preventDefault(); if (state.mode === "ptt") start(); });
   btn.addEventListener("touchend", (e) => { e.preventDefault(); if (state.mode === "ptt") stop(); });
   btn.addEventListener("click", () => {
     if (state.mode === "ptt") return;
-    if (listening) stop(); else start(true);
+    if (listening) stop(); else start();
   });
 
   return { stop };
@@ -1153,6 +1179,10 @@ let groupMic = null;
 function initGroupMic() {
   let recognizer = null;
   let listening = false;
+  // Sama seperti mode 1-HP: tampung dulu teks final selama tombol PTT
+  // ditahan, baru kirim saat dilepas — supaya jeda hening di tengah bicara
+  // tidak membuat kalimat terpotong & terkirim sebelum selesai.
+  let pttBuffer = "";
 
   async function handleFinalText(text) {
     $("liveGroup").textContent = "";
@@ -1160,18 +1190,27 @@ function initGroupMic() {
     sendToGroupSession(text);
   }
 
-  function start(continuous) {
+  function start() {
     if (!state.sessionActive) { alert("Tekan 'Mulai Sesi' terlebih dahulu."); return; }
     if (!state.sessionConnected) { alert("Gabung/buat sesi grup terlebih dahulu."); return; }
+    const isPtt = state.mode === "ptt";
+    pttBuffer = "";
     recognizer = createRecognizer(langByCode(state.myLang).stt, {
-      continuous,
-      onInterim: (t) => $("liveGroup").textContent = t,
-      onFinal: (t) => { handleFinalText(t); if (!continuous) stop(); },
+      continuous: true,
+      onInterim: (t) => $("liveGroup").textContent = isPtt ? (pttBuffer ? pttBuffer + " " + t : t) : t,
+      onFinal: (t) => {
+        if (isPtt) {
+          pttBuffer = pttBuffer ? (pttBuffer + " " + t) : t;
+          $("liveGroup").textContent = pttBuffer;
+        } else {
+          handleFinalText(t);
+        }
+      },
       onEnd: () => {
         listening = false;
         setMicListening("micGroup", false);
-        if (continuous && state.sessionActive && recognizer && recognizer.__shouldRestart) {
-          try { recognizer.start(); } catch {}
+        if (state.sessionActive && recognizer && recognizer.__shouldRestart) {
+          try { recognizer.start(); listening = true; setMicListening("micGroup", true); } catch {}
         }
       },
       onError: (e) => {
@@ -1180,7 +1219,7 @@ function initGroupMic() {
       }
     });
     if (!recognizer) return;
-    recognizer.__shouldRestart = continuous;
+    recognizer.__shouldRestart = true;
     listening = true;
     setMicListening("micGroup", true);
     try { recognizer.start(); } catch (e) { console.warn(e); }
@@ -1191,17 +1230,22 @@ function initGroupMic() {
     if (recognizer) { recognizer.__shouldRestart = false; try { recognizer.stop(); } catch {} }
     setMicListening("micGroup", false);
     $("liveGroup").textContent = "";
+    if (state.mode === "ptt" && pttBuffer.trim()) {
+      const text = pttBuffer.trim();
+      pttBuffer = "";
+      handleFinalText(text);
+    }
   }
 
   const btn = $("micGroup");
-  btn.addEventListener("mousedown", () => { if (state.mode === "ptt") start(false); });
+  btn.addEventListener("mousedown", () => { if (state.mode === "ptt") start(); });
   btn.addEventListener("mouseup", () => { if (state.mode === "ptt") stop(); });
   btn.addEventListener("mouseleave", () => { if (state.mode === "ptt" && listening) stop(); });
-  btn.addEventListener("touchstart", (e) => { e.preventDefault(); if (state.mode === "ptt") start(false); });
+  btn.addEventListener("touchstart", (e) => { e.preventDefault(); if (state.mode === "ptt") start(); });
   btn.addEventListener("touchend", (e) => { e.preventDefault(); if (state.mode === "ptt") stop(); });
   btn.addEventListener("click", () => {
     if (state.mode === "ptt") return;
-    if (listening) stop(); else start(true);
+    if (listening) stop(); else start();
   });
 
   return { stop };
