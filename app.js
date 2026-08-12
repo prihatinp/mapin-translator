@@ -22,6 +22,8 @@ const state = {
   backend: localStorage.getItem("mapin_backend") || MAPIN_CONFIG.backendMode,
   appsScriptUrl: localStorage.getItem("mapin_url") || MAPIN_CONFIG.appsScriptUrl,
   appsScriptKey: localStorage.getItem("mapin_key") || MAPIN_CONFIG.appsScriptApiKey,
+  firebaseDbUrl: (localStorage.getItem("mapin_fb_url") || MAPIN_CONFIG.firebaseDbUrl || "").replace(/\/+$/, ""),
+  libreTranslateUrl: (localStorage.getItem("mapin_libre_url") || MAPIN_CONFIG.libreTranslateUrl || "").replace(/\/+$/, ""),
   glossary: JSON.parse(localStorage.getItem("mapin_glossary") || "[]"),
   sessionActive: false,
   transcriptLog: [],
@@ -38,6 +40,7 @@ const state = {
   sessionConnected: false,
   pollTimer: null,
   pollSinceIndex: 0,
+  seenMessageKeys: null, // Set — dipakai mode Firebase (relay via polling REST, tidak ada index numerik)
   participants: []
 };
 
@@ -149,10 +152,19 @@ pingLatency();
 function openModal(id) { $(id).classList.add("open"); }
 function closeModal(id) { $(id).classList.remove("open"); }
 document.querySelectorAll("[data-close]").forEach(b => b.addEventListener("click", () => closeModal(b.dataset.close)));
+function updateSettingsFieldsVisibility() {
+  const backend = $("backendToggle").querySelector(".active").dataset.backend;
+  $("appsScriptFields").style.display = backend === "appsscript" ? "block" : "none";
+  $("firebaseFields").style.display = backend === "firebase" ? "block" : "none";
+}
+
 $("btnSettings").addEventListener("click", () => {
   $("appsScriptUrl").value = state.appsScriptUrl;
   $("appsScriptKey").value = state.appsScriptKey;
+  $("firebaseDbUrl").value = state.firebaseDbUrl;
+  $("libreTranslateUrl").value = state.libreTranslateUrl;
   [...$("backendToggle").children].forEach(b => b.classList.toggle("active", b.dataset.backend === state.backend));
+  updateSettingsFieldsVisibility();
   openModal("settingsModal");
 });
 $("backendToggle").addEventListener("click", e => {
@@ -160,15 +172,20 @@ $("backendToggle").addEventListener("click", e => {
   if (!btn) return;
   [...$("backendToggle").children].forEach(b => b.classList.remove("active"));
   btn.classList.add("active");
+  updateSettingsFieldsVisibility();
 });
 $("btnSaveSettings").addEventListener("click", () => {
   const backend = $("backendToggle").querySelector(".active").dataset.backend;
   state.backend = backend;
   state.appsScriptUrl = $("appsScriptUrl").value.trim();
   state.appsScriptKey = $("appsScriptKey").value.trim();
+  state.firebaseDbUrl = $("firebaseDbUrl").value.trim().replace(/\/+$/, "");
+  state.libreTranslateUrl = $("libreTranslateUrl").value.trim().replace(/\/+$/, "");
   localStorage.setItem("mapin_backend", state.backend);
   localStorage.setItem("mapin_url", state.appsScriptUrl);
   localStorage.setItem("mapin_key", state.appsScriptKey);
+  localStorage.setItem("mapin_fb_url", state.firebaseDbUrl);
+  localStorage.setItem("mapin_libre_url", state.libreTranslateUrl);
   updateBackendStatusPill();
   showCopyFeedback("✅ Pengaturan disimpan di HP ini.");
   setTimeout(() => closeModal("settingsModal"), 700);
@@ -186,6 +203,14 @@ function updateBackendStatusPill() {
       dot.className = "dot offline";
       text.textContent = "Backend: Produksi (belum lengkap)";
     }
+  } else if (state.backend === "firebase") {
+    if (state.firebaseDbUrl && state.libreTranslateUrl) {
+      dot.className = "dot online";
+      text.textContent = "Backend: Firebase";
+    } else {
+      dot.className = "dot offline";
+      text.textContent = "Backend: Firebase (belum lengkap)";
+    }
   } else {
     dot.className = "dot connecting";
     text.textContent = "Backend: Demo";
@@ -194,7 +219,67 @@ function updateBackendStatusPill() {
 updateBackendStatusPill();
 
 // ---------- Tes Koneksi Backend — diagnosa langkah demi langkah dari HP ----------
+async function testFirebaseConnection() {
+  const resultEl = $("testConnectionResult");
+  const dbUrl = $("firebaseDbUrl").value.trim().replace(/\/+$/, "");
+  const libreUrl = $("libreTranslateUrl").value.trim().replace(/\/+$/, "");
+
+  resultEl.style.color = "var(--muted)";
+  resultEl.textContent = "🔄 Menguji koneksi...";
+
+  if (!dbUrl) {
+    resultEl.style.color = "#e04b4b";
+    resultEl.textContent = "⚠️ Kolom Firebase Database URL masih kosong. Lihat DEPLOY_GUIDE.md bagian 'Opsi C' untuk cara membuatnya.";
+    return;
+  }
+  if (!/^https:\/\/.+firebasedatabase\.app$|^https:\/\/.+\.firebaseio\.com$/.test(dbUrl)) {
+    resultEl.style.color = "#e8a92c";
+    resultEl.textContent = "🟡 Format URL tampak tidak biasa untuk Firebase Database URL (harusnya diakhiri .firebasedatabase.app atau .firebaseio.com). Tetap mencoba menghubungi...";
+  }
+
+  try {
+    const res = await fetch(dbUrl + "/.json?shallow=true");
+    if (!res.ok) {
+      resultEl.style.color = "#e04b4b";
+      resultEl.textContent = "❌ Firebase merespons error (status " + res.status + "). Cek lagi aturan keamanan (Rules) Database Anda — pastikan \".read\": true untuk uji coba ini.";
+      return;
+    }
+  } catch (err) {
+    resultEl.style.color = "#e04b4b";
+    resultEl.textContent = "❌ Tidak bisa menjangkau Firebase Database URL (" + err.message + "). Cek lagi URL-nya di Firebase Console → Realtime Database.";
+    return;
+  }
+
+  if (!libreUrl) {
+    resultEl.style.color = "#e8a92c";
+    resultEl.textContent = "🟡 Firebase terjangkau! Tapi kolom URL LibreTranslate masih kosong — isi dulu (mis. https://translate.fedilab.app).";
+    return;
+  }
+
+  try {
+    const res = await fetch(libreUrl + "/translate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ q: "test", source: "en", target: "id", format: "text" })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.translatedText) {
+      resultEl.style.color = "#e8a92c";
+      resultEl.textContent = "🟡 Firebase OK, tapi mirror LibreTranslate ini sedang bermasalah (" + (data.error || res.status) + "). Coba ganti ke mirror lain di DEPLOY_GUIDE.md 'Opsi C'.";
+      return;
+    }
+    resultEl.style.color = "var(--green)";
+    resultEl.textContent = "✅ Berhasil! Firebase & LibreTranslate keduanya terjangkau. Simpan Pengaturan lalu coba Mode Grup lagi.";
+  } catch (err) {
+    resultEl.style.color = "#e8a92c";
+    resultEl.textContent = "🟡 Firebase OK, tapi gagal menghubungi LibreTranslate (" + err.message + "). Coba ganti mirror-nya.";
+  }
+}
+
 async function testBackendConnection() {
+  const backend = $("backendToggle").querySelector(".active").dataset.backend;
+  if (backend === "firebase") return testFirebaseConnection();
+
   const resultEl = $("testConnectionResult");
   const url = $("appsScriptUrl").value.trim();
   const key = $("appsScriptKey").value.trim();
@@ -302,6 +387,8 @@ $("btnToggleKeyVisibility").addEventListener("click", () => {
   const input = $("appsScriptKey");
   input.type = input.type === "password" ? "text" : "password";
 });
+$("btnCopyFirebaseUrl").addEventListener("click", () => copyToClipboard($("firebaseDbUrl").value.trim(), "Firebase Database URL"));
+$("btnCopyLibreUrl").addEventListener("click", () => copyToClipboard($("libreTranslateUrl").value.trim(), "URL LibreTranslate"));
 
 // ---------- Glossary modal ----------
 function renderGlossary() {
@@ -367,6 +454,8 @@ async function translateText(text, sourceCode, targetCode) {
   let translated;
   if (state.backend === "appsscript" && state.appsScriptUrl) {
     translated = await translateViaAppsScript(protectedText, sourceCode, targetCode);
+  } else if (state.backend === "firebase" && state.libreTranslateUrl) {
+    translated = await translateViaLibreTranslate(protectedText, sourceCode, targetCode);
   } else {
     translated = await translateViaDemoApi(protectedText, sourceCode, targetCode);
   }
@@ -385,17 +474,74 @@ async function translateViaAppsScript(text, sourceCode, targetCode) {
   return data.translatedText;
 }
 
+// Mode Firebase: mesin terjemahan LibreTranslate dipanggil LANGSUNG dari
+// browser (tanpa server rahasia) — lihat catatan keamanan di config.js.
+// Coba ulang sekali ke mirror yang sama kalau gagal sesaat (jaringan/
+// mirror publik sedang sibuk), supaya lebih tahan banting seperti mode
+// Apps Script.
+async function translateViaLibreTranslate(text, sourceCode, targetCode, retriesLeft) {
+  if (!state.libreTranslateUrl) throw new Error("URL LibreTranslate belum diatur di ⚙️ Pengaturan.");
+  if (retriesLeft === undefined) retriesLeft = 1;
+  try {
+    const res = await fetch(state.libreTranslateUrl + "/translate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ q: text, source: sourceCode, target: targetCode, format: "text" })
+    });
+    if (!res.ok) throw new Error("Server LibreTranslate merespons status " + res.status);
+    const data = await res.json();
+    if (data.error) throw new Error(data.error);
+    return data.translatedText || text;
+  } catch (err) {
+    if (retriesLeft > 0) {
+      await sleep_(500);
+      return translateViaLibreTranslate(text, sourceCode, targetCode, retriesLeft - 1);
+    }
+    throw err;
+  }
+}
+
 // Generic caller untuk semua aksi backend (translate, createSession, joinSession, send, poll)
-async function callBackend(action, payload) {
+const sleep_ = (ms) => new Promise(r => setTimeout(r, ms));
+
+// Google Apps Script SELALU membalas HTTP 200 dari kode Code.gs kita
+// sendiri (Apps Script tidak mendukung status HTTP kustom) — jadi kalau
+// fetch() di sini menerima status non-200 (mis. 404/502) atau gagal total
+// (network error), itu artinya infrastruktur Google gagal MERUTEKAN
+// permintaan ke script sama sekali (belum sempat dieksekusi), bukan error
+// dari logika aplikasi. Ini kelemahan yang cukup dikenal pada Apps Script
+// Web App untuk trafik yang datang beruntun. Solusinya: coba ulang
+// otomatis beberapa kali sebelum benar-benar dianggap gagal — kegagalan
+// semacam ini biasanya hilang sendiri dalam percobaan ke-2/ke-3.
+// Error DARI LOGIKA APLIKASI (mis. "PIN salah", "Ruangan penuh") selalu
+// datang sebagai HTTP 200 + field `error` di JSON, jadi TIDAK diulang di
+// sini (mengulang tidak akan mengubah hasilnya).
+async function callBackend(action, payload, retriesLeft) {
   if (!state.appsScriptUrl) throw new Error("URL Apps Script belum diatur di ⚙️ Pengaturan.");
-  const res = await fetch(state.appsScriptUrl, {
-    method: "POST",
-    headers: { "Content-Type": "text/plain;charset=utf-8" }, // avoids CORS preflight on Apps Script
-    body: JSON.stringify(Object.assign({ apiKey: state.appsScriptKey, action }, payload))
-  });
-  if (!res.ok) throw new Error("Backend error " + res.status);
+  if (retriesLeft === undefined) retriesLeft = 2; // total 3 percobaan
+
+  let res, networkError = null;
+  try {
+    res = await fetch(state.appsScriptUrl, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" }, // avoids CORS preflight on Apps Script
+      body: JSON.stringify(Object.assign({ apiKey: state.appsScriptKey, action }, payload))
+    });
+  } catch (err) {
+    networkError = err;
+  }
+
+  const transientFailure = networkError || !res.ok;
+  if (transientFailure) {
+    if (retriesLeft > 0) {
+      await sleep_(500);
+      return callBackend(action, payload, retriesLeft - 1);
+    }
+    throw new Error(networkError ? networkError.message : ("Backend error " + res.status + " (server Google sesaat tidak merespons — coba lagi)"));
+  }
+
   const data = await res.json();
-  if (data.error) throw new Error(data.error);
+  if (data.error) throw new Error(data.error); // error logika aplikasi — tidak diulang
   return data;
 }
 
@@ -405,12 +551,56 @@ async function callBackend(action, payload) {
 // Server menerjemahkan tiap pesan sesuai bahasa masing-masing pendengar
 // saat poll — supaya layar tidak dipenuhi banyak bahasa sekaligus.
 // ============================================================
-function requireAppsScriptBackend() {
-  if (state.backend !== "appsscript" || !state.appsScriptUrl) {
-    alert("Mode Grup Multi-HP butuh backend Produksi (Apps Script) aktif.\nBuka ⚙️ Pengaturan, pilih 'Produksi (Apps Script)', isi URL & API Key, lalu coba lagi.");
+function requireGroupBackend() {
+  const okAppsScript = state.backend === "appsscript" && state.appsScriptUrl;
+  const okFirebase = state.backend === "firebase" && state.firebaseDbUrl && state.libreTranslateUrl;
+  if (!okAppsScript && !okFirebase) {
+    alert("Mode Grup Multi-HP butuh backend aktif.\nBuka ⚙️ Pengaturan, pilih 'Produksi (Apps Script)' atau 'Firebase (gratis)', lengkapi kolomnya, lalu coba lagi.");
     return false;
   }
   return true;
+}
+
+// ---------- Firebase Realtime Database — REST API (tanpa SDK, tanpa server) ----------
+// Dipanggil langsung via fetch() ke {databaseURL}/{path}.json, sesuai
+// dokumentasi REST resmi Firebase. Tidak ada rate limiting/validasi
+// tambahan di sini selain yang diatur lewat Rules Database itu sendiri
+// — lihat DEPLOY_GUIDE.md "Opsi C" untuk contoh Rules yang disarankan.
+function fbUrl(path) { return state.firebaseDbUrl + path + ".json"; }
+
+async function fbGet(path) {
+  const res = await fetch(fbUrl(path));
+  if (!res.ok) throw new Error("Firebase error (status " + res.status + ")");
+  return res.json();
+}
+async function fbPut(path, value) {
+  const res = await fetch(fbUrl(path), { method: "PUT", body: JSON.stringify(value) });
+  if (!res.ok) throw new Error("Firebase error (status " + res.status + ")");
+  return res.json();
+}
+async function fbPatch(path, value) {
+  const res = await fetch(fbUrl(path), { method: "PATCH", body: JSON.stringify(value) });
+  if (!res.ok) throw new Error("Firebase error (status " + res.status + ")");
+  return res.json();
+}
+async function fbPost(path, value) {
+  const res = await fetch(fbUrl(path), { method: "POST", body: JSON.stringify(value) });
+  if (!res.ok) throw new Error("Firebase error (status " + res.status + ")");
+  return res.json(); // { name: "<pushKey>" }
+}
+async function fbDelete(path) {
+  const res = await fetch(fbUrl(path), { method: "DELETE" });
+  if (!res.ok) throw new Error("Firebase error (status " + res.status + ")");
+}
+
+function randomCode_(len) {
+  const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; // tanpa 0/O/1/I biar tidak salah baca
+  let out = "";
+  for (let i = 0; i < len; i++) out += chars[Math.floor(Math.random() * chars.length)];
+  return out;
+}
+function randomParticipantId_() {
+  return (crypto.randomUUID ? crypto.randomUUID() : (Date.now() + "-" + Math.random().toString(36).slice(2)));
 }
 
 function setSessionStatus(text, kind) {
@@ -431,7 +621,7 @@ function renderParticipants() {
 }
 
 async function createSession() {
-  if (!requireAppsScriptBackend()) return;
+  if (!requireGroupBackend()) return;
   const name = ($("myNameInput").value || "").trim() || "Peserta";
   const roomName = ($("roomNameInput").value || "").trim() || "Ruangan Tanpa Nama";
   const pin = ($("roomPinInput").value || "").trim();
@@ -439,7 +629,9 @@ async function createSession() {
   state.myName = name;
   setSessionStatus("Membuat ruangan...", "connecting");
   try {
-    const data = await callBackend("createSession", { name, lang: state.myLang, roomName, pin, isPublic });
+    const data = state.backend === "firebase"
+      ? await createSessionFirebase_(name, roomName, pin, isPublic)
+      : await callBackend("createSession", { name, lang: state.myLang, roomName, pin, isPublic });
     state.sessionCode = data.sessionCode;
     state.participantId = data.participantId;
     state.roomName = data.roomName;
@@ -449,6 +641,7 @@ async function createSession() {
     $("sessionCodeInput").value = data.sessionCode;
     state.sessionConnected = true;
     state.pollSinceIndex = 0;
+    state.seenMessageKeys = new Set();
     renderParticipants();
     updateLockButton();
     $("groupPanelTitle").textContent = "💬 " + state.roomName;
@@ -460,8 +653,34 @@ async function createSession() {
   }
 }
 
+async function createSessionFirebase_(name, roomName, pin, isPublic) {
+  let code;
+  for (let attempt = 0; attempt < 5; attempt++) {
+    code = randomCode_(5);
+    const existing = await fbGet("/rooms/" + code);
+    if (!existing) break;
+    code = null;
+  }
+  if (!code) throw new Error("Gagal membuat kode ruangan unik, coba lagi.");
+  const participantId = randomParticipantId_();
+  const now = Date.now();
+  const room = {
+    roomName, pin: pin || "", locked: false, isPublic: !!isPublic,
+    hostId: participantId, createdAt: now,
+    participants: { [participantId]: { name, lang: state.myLang, joinedAt: now } }
+  };
+  await fbPut("/rooms/" + code, room);
+  if (isPublic) {
+    await fbPut("/publicRooms/" + code, { roomName, participantCount: 1, createdAt: now });
+  }
+  return {
+    sessionCode: code, participantId, roomName,
+    participants: [{ participantId, name, lang: state.myLang }]
+  };
+}
+
 async function joinSession(codeOverride) {
-  if (!requireAppsScriptBackend()) return;
+  if (!requireGroupBackend()) return;
   const code = (codeOverride || $("sessionCodeInput").value.trim()).toUpperCase();
   const name = ($("myNameInput").value || "").trim() || "Peserta";
   const pin = ($("roomPinInput").value || "").trim();
@@ -469,7 +688,9 @@ async function joinSession(codeOverride) {
   state.myName = name;
   setSessionStatus("Menyambungkan...", "connecting");
   try {
-    const data = await callBackend("joinSession", { sessionCode: code, name, lang: state.myLang, pin });
+    const data = state.backend === "firebase"
+      ? await joinSessionFirebase_(code, name, pin)
+      : await callBackend("joinSession", { sessionCode: code, name, lang: state.myLang, pin });
     state.sessionCode = code;
     state.participantId = data.participantId;
     state.roomName = data.roomName || "Ruangan " + code;
@@ -478,6 +699,7 @@ async function joinSession(codeOverride) {
     state.participants = data.participants || [];
     state.sessionConnected = true;
     state.pollSinceIndex = 0;
+    state.seenMessageKeys = new Set();
     renderParticipants();
     updateLockButton();
     $("groupPanelTitle").textContent = "💬 " + state.roomName;
@@ -488,6 +710,25 @@ async function joinSession(codeOverride) {
   } catch (err) {
     setSessionStatus("Gagal gabung: " + err.message, "offline");
   }
+}
+
+async function joinSessionFirebase_(code, name, pin) {
+  const room = await fbGet("/rooms/" + code);
+  if (!room) throw new Error("Ruangan tidak ditemukan. Cek lagi kodenya.");
+  if (room.locked) throw new Error("Ruangan sedang dikunci oleh host — tidak menerima peserta baru.");
+  if (room.pin && room.pin !== pin) throw new Error("PIN salah.");
+  const participants = room.participants || {};
+  const count = Object.keys(participants).length;
+  if (count >= 5) throw new Error("Ruangan sudah penuh (maksimal 5 peserta).");
+  const participantId = randomParticipantId_();
+  const now = Date.now();
+  await fbPatch("/rooms/" + code + "/participants", { [participantId]: { name, lang: state.myLang, joinedAt: now } });
+  if (room.isPublic) {
+    await fbPatch("/publicRooms/" + code, { participantCount: count + 1 }).catch(() => {});
+  }
+  const allParticipants = Object.entries(Object.assign({}, participants, { [participantId]: { name, lang: state.myLang } }))
+    .map(([pid, p]) => ({ participantId: pid, name: p.name, lang: p.lang }));
+  return { participantId, roomName: room.roomName, participants: allParticipants };
 }
 
 function updateLockButton() {
@@ -502,8 +743,28 @@ function updateLockButton() {
 
 async function toggleLockRoom() {
   try {
-    const data = await callBackend("lockRoom", { sessionCode: state.sessionCode, participantId: state.participantId });
-    state.roomLocked = data.locked;
+    let locked;
+    if (state.backend === "firebase") {
+      locked = !state.roomLocked;
+      await fbPatch("/rooms/" + state.sessionCode, { locked });
+      // Sembunyikan dari daftar publik saat dikunci, tampilkan lagi saat dibuka
+      if (locked) {
+        await fbDelete("/publicRooms/" + state.sessionCode).catch(() => {});
+      } else {
+        const room = await fbGet("/rooms/" + state.sessionCode);
+        if (room && room.isPublic) {
+          await fbPut("/publicRooms/" + state.sessionCode, {
+            roomName: room.roomName,
+            participantCount: Object.keys(room.participants || {}).length,
+            createdAt: room.createdAt || Date.now()
+          }).catch(() => {});
+        }
+      }
+    } else {
+      const data = await callBackend("lockRoom", { sessionCode: state.sessionCode, participantId: state.participantId });
+      locked = data.locked;
+    }
+    state.roomLocked = locked;
     updateLockButton();
     addBubble("transcriptGroup", state.roomLocked ? "🔒 Ruangan dikunci — tidak menerima peserta baru." : "🔓 Ruangan dibuka kembali.", null, "Sistem");
   } catch (err) {
@@ -513,13 +774,12 @@ async function toggleLockRoom() {
 $("btnLockRoom").addEventListener("click", toggleLockRoom);
 
 async function listActiveRooms() {
-  if (!requireAppsScriptBackend()) return;
+  if (!requireGroupBackend()) return;
   const box = $("roomsList");
   box.innerHTML = "<p class='small-note'>Memuat...</p>";
   openModal("roomsModal");
   try {
-    const data = await callBackend("listRooms", {});
-    const rooms = data.rooms || [];
+    const rooms = state.backend === "firebase" ? await listActiveRoomsFirebase_() : (await callBackend("listRooms", {})).rooms || [];
     $("roomsEmptyNote").style.display = rooms.length === 0 ? "block" : "none";
     box.innerHTML = "";
     rooms.forEach(r => {
@@ -539,6 +799,29 @@ async function listActiveRooms() {
   } catch (err) {
     box.innerHTML = `<p class="small-note">Gagal memuat daftar ruangan: ${err.message}</p>`;
   }
+}
+
+// Firebase Spark tidak punya cron/Cloud Functions untuk auto-hapus entri
+// kedaluwarsa (beda dengan CacheService di Apps Script yang otomatis
+// expire 6 jam). Sebagai gantinya, setiap kali daftar ruangan publik
+// dibuka, entri yang lebih tua dari 6 jam dibersihkan langsung dari sini
+// (best-effort housekeeping, bukan jaminan mutlak — ruangan lama yang
+// tidak pernah dilihat lewat menu ini bisa tetap tersimpan di database).
+const ROOM_TTL_MS = 6 * 60 * 60 * 1000;
+async function listActiveRoomsFirebase_() {
+  const data = await fbGet("/publicRooms");
+  if (!data) return [];
+  const now = Date.now();
+  const out = [];
+  for (const code of Object.keys(data)) {
+    const r = data[code];
+    if (now - (r.createdAt || 0) > ROOM_TTL_MS) {
+      fbDelete("/publicRooms/" + code).catch(() => {});
+      continue;
+    }
+    out.push({ code, roomName: r.roomName, participantCount: r.participantCount || 0 });
+  }
+  return out;
 }
 const MAPIN_MAX_PARTICIPANTS_DISPLAY = 5;
 
@@ -564,19 +847,23 @@ const POLL_FAIL_THRESHOLD = 3;
 async function pollSessionMessages() {
   if (!state.sessionConnected || !state.sessionCode) return;
   try {
-    const data = await callBackend("poll", {
-      sessionCode: state.sessionCode,
-      participantId: state.participantId,
-      sinceIndex: state.pollSinceIndex,
-      myLang: state.myLang
-    });
-    state.pollSinceIndex = data.nextIndex;
-    if (data.participants) { state.participants = data.participants; renderParticipants(); }
-    if (typeof data.locked === "boolean" && data.locked !== state.roomLocked) {
-      state.roomLocked = data.locked;
-      updateLockButton();
+    if (state.backend === "firebase") {
+      await pollSessionMessagesFirebase_();
+    } else {
+      const data = await callBackend("poll", {
+        sessionCode: state.sessionCode,
+        participantId: state.participantId,
+        sinceIndex: state.pollSinceIndex,
+        myLang: state.myLang
+      });
+      state.pollSinceIndex = data.nextIndex;
+      if (data.participants) { state.participants = data.participants; renderParticipants(); }
+      if (typeof data.locked === "boolean" && data.locked !== state.roomLocked) {
+        state.roomLocked = data.locked;
+        updateLockButton();
+      }
+      (data.messages || []).forEach(handleIncomingGroupMessage);
     }
-    (data.messages || []).forEach(handleIncomingGroupMessage);
     // Pulih dari kegagalan sementara — kembalikan status normal tanpa berisik
     if (state.pollFailCount > 0) {
       state.pollFailCount = 0;
@@ -591,6 +878,39 @@ async function pollSessionMessages() {
   }
 }
 
+// Mode Firebase: tidak ada nomor urut pesan seperti di Apps Script, jadi
+// tiap poll mengambil SELURUH isi ruangan (peserta + pesan) dan membanding-
+// kan kunci pesan yang sudah pernah dilihat (state.seenMessageKeys) — cukup
+// murah karena ruangan kecil (maks. 5 peserta, riwayat pesan wajar per sesi).
+async function pollSessionMessagesFirebase_() {
+  const room = await fbGet("/rooms/" + state.sessionCode);
+  if (!room) throw new Error("Ruangan tidak ditemukan lagi (mungkin dihapus).");
+
+  const participants = Object.entries(room.participants || {}).map(([pid, p]) => ({ participantId: pid, name: p.name, lang: p.lang }));
+  state.participants = participants;
+  renderParticipants();
+
+  if (typeof room.locked === "boolean" && room.locked !== state.roomLocked) {
+    state.roomLocked = room.locked;
+    updateLockButton();
+  }
+
+  if (!state.seenMessageKeys) state.seenMessageKeys = new Set();
+  const messages = room.messages || {};
+  const newKeys = Object.keys(messages).filter(k => !state.seenMessageKeys.has(k)).sort();
+  for (const key of newKeys) {
+    state.seenMessageKeys.add(key);
+    const m = messages[key];
+    if (m.participantId === state.participantId) continue; // pesan sendiri sudah tampil lokal
+    try {
+      const translatedText = await translateViaLibreTranslate(m.original, m.sourceLang, state.myLang);
+      handleIncomingGroupMessage({ participantId: m.participantId, name: m.name, sourceLang: m.sourceLang, original: m.original, translatedText });
+    } catch (err) {
+      console.warn("Gagal menerjemahkan pesan masuk:", err.message);
+    }
+  }
+}
+
 function handleIncomingGroupMessage(msg) {
   if (msg.participantId === state.participantId) return; // pesan sendiri sudah ditampilkan lokal
   addBubble("transcriptGroup", msg.original, msg.translatedText,
@@ -601,7 +921,14 @@ function handleIncomingGroupMessage(msg) {
 async function sendToGroupSession(original) {
   if (state.deviceMode !== "dual" || !state.sessionConnected) return;
   try {
-    await callBackend("send", { sessionCode: state.sessionCode, participantId: state.participantId, original });
+    if (state.backend === "firebase") {
+      const key = await fbPost("/rooms/" + state.sessionCode + "/messages", {
+        participantId: state.participantId, name: state.myName, sourceLang: state.myLang, original, time: Date.now()
+      });
+      if (key && key.name && state.seenMessageKeys) state.seenMessageKeys.add(key.name); // jangan proses ulang pesan sendiri saat poll berikutnya
+    } else {
+      await callBackend("send", { sessionCode: state.sessionCode, participantId: state.participantId, original });
+    }
   } catch (err) {
     console.warn("Gagal mengirim ke sesi:", err.message);
     addBubble("transcriptGroup", "⚠️ Gagal mengirim pesan: " + err.message, null, "Sistem");
@@ -613,7 +940,7 @@ $("deviceModeToggle").addEventListener("click", e => {
   const btn = e.target.closest("button[data-devicemode]");
   if (!btn) return;
   const newMode = btn.dataset.devicemode;
-  if (newMode === "dual" && !requireAppsScriptBackend()) return;
+  if (newMode === "dual" && !requireGroupBackend()) return;
   [...$("deviceModeToggle").children].forEach(b => b.classList.remove("active"));
   btn.classList.add("active");
   state.deviceMode = newMode;

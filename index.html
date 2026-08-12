@@ -120,7 +120,7 @@
       1–4 rekan lain (maks. 5 peserta/ruangan) lewat jalur terpisah (chat/lisan) — bukan lewat aplikasi ini. Yang
       lain isi nama & bahasa, masukkan kode (+PIN jika ada), klik <strong>Gabung Ruangan</strong>. Setiap HP
       <strong>hanya menampilkan &amp; menyuarakan terjemahan ke bahasa milik sendiri</strong>. Mode ini butuh
-      backend Apps Script aktif — atur di ⚙️ Pengaturan → Produksi (Apps Script) terlebih dulu.
+      backend aktif — atur di ⚙️ Pengaturan → pilih Produksi (Apps Script) atau Firebase (gratis) terlebih dulu.
     </div>
   </section>
 
@@ -191,26 +191,43 @@
     <div class="field" style="margin-bottom:10px;">
       <label>Mode Backend</label>
       <div class="pill-toggle" id="backendToggle">
-        <button data-backend="demo" class="active">Demo (tanpa setup)</button>
+        <button data-backend="demo">Demo (tanpa setup)</button>
         <button data-backend="appsscript">Produksi (Apps Script)</button>
+        <button data-backend="firebase" class="active">Firebase (gratis, tanpa kartu)</button>
       </div>
     </div>
-    <div class="row">
-      <input type="text" id="appsScriptUrl" placeholder="URL Web App Apps Script (https://script.google.com/macros/s/.../exec)" />
-      <button class="btn btn-secondary" id="btnCopyUrl" type="button" title="Salin URL">📋</button>
+
+    <div id="appsScriptFields">
+      <div class="row">
+        <input type="text" id="appsScriptUrl" placeholder="URL Web App Apps Script (https://script.google.com/macros/s/.../exec)" />
+        <button class="btn btn-secondary" id="btnCopyUrl" type="button" title="Salin URL">📋</button>
+      </div>
+      <div class="row">
+        <input type="password" id="appsScriptKey" placeholder="API Key (harus sama dengan Script Properties di Apps Script)" />
+        <button class="btn btn-secondary" id="btnCopyKey" type="button" title="Salin API Key">📋</button>
+        <button class="btn btn-ghost" id="btnToggleKeyVisibility" type="button" title="Lihat/sembunyikan">👁️</button>
+      </div>
     </div>
-    <div class="row">
-      <input type="password" id="appsScriptKey" placeholder="API Key (harus sama dengan Script Properties di Apps Script)" />
-      <button class="btn btn-secondary" id="btnCopyKey" type="button" title="Salin API Key">📋</button>
-      <button class="btn btn-ghost" id="btnToggleKeyVisibility" type="button" title="Lihat/sembunyikan">👁️</button>
+
+    <div id="firebaseFields">
+      <div class="row">
+        <input type="text" id="firebaseDbUrl" placeholder="Firebase Database URL (https://nama-proyek-default-rtdb...firebasedatabase.app)" />
+        <button class="btn btn-secondary" id="btnCopyFirebaseUrl" type="button" title="Salin URL">📋</button>
+      </div>
+      <div class="row">
+        <input type="text" id="libreTranslateUrl" placeholder="URL LibreTranslate (mis: https://translate.fedilab.app)" />
+        <button class="btn btn-secondary" id="btnCopyLibreUrl" type="button" title="Salin URL">📋</button>
+      </div>
+      <p class="small-note">⚠️ Mode ini <strong>TIDAK</strong> memakai server rahasia — Database URL terlihat oleh siapa pun yang membuka source code, dan tidak ada rate limiting otomatis. Dipilih karena 100% gratis tanpa kartu kredit. Lihat <code>DEPLOY_GUIDE.md</code> bagian "Opsi C" untuk cara membuat proyek Firebase & aturan keamanan yang disarankan.</p>
     </div>
+
     <p class="small-note" id="copyFeedback" style="min-height:16px;color:var(--green);"></p>
     <div style="display:flex;gap:10px;flex-wrap:wrap;">
       <button class="btn btn-primary" id="btnSaveSettings">Simpan Pengaturan</button>
       <button class="btn btn-secondary" id="btnTestConnection">🔌 Tes Koneksi Backend</button>
     </div>
     <p class="small-note" id="testConnectionResult" style="margin-top:10px;min-height:16px;"></p>
-    <p class="small-note" style="margin-top:14px;">Lihat file <code>backend/Code.gs</code> dan <code>DEPLOY_GUIDE.md</code> untuk cara deploy backend Apps Script Anda sendiri.</p>
+    <p class="small-note" style="margin-top:14px;">Lihat <code>DEPLOY_GUIDE.md</code> untuk cara deploy backend Apps Script (Opsi B) atau Firebase + LibreTranslate (Opsi C).</p>
   </div>
 </div>
 
