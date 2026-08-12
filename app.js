@@ -544,11 +544,22 @@ const MAPIN_MAX_PARTICIPANTS_DISPLAY = 5;
 
 function startPolling() {
   stopPolling();
-  state.pollTimer = setInterval(pollSessionMessages, 1500);
+  state.pollFailCount = 0;
+  state.pollTimer = setInterval(pollSessionMessages, 1800);
 }
 function stopPolling() {
   if (state.pollTimer) { clearInterval(state.pollTimer); state.pollTimer = null; }
+  state.pollFailCount = 0;
 }
+
+// Ambang batas kegagalan berturut-turut sebelum ditampilkan sebagai error
+// ke pengguna. Google Apps Script kadang membalas error sesaat (404/500)
+// saat di-poll sangat sering (tiap 1,5-2 detik) — ini kelemahan bawaan
+// infrastruktur Apps Script (cold start/batas eksekusi bersamaan), BUKAN
+// berarti koneksi benar-benar putus. Jadi kegagalan tunggal diam-diam
+// dicoba lagi di putaran berikutnya tanpa membuat pengguna panik; baru
+// ditampilkan sebagai "Koneksi terganggu" kalau gagal berturut-turut.
+const POLL_FAIL_THRESHOLD = 3;
 
 async function pollSessionMessages() {
   if (!state.sessionConnected || !state.sessionCode) return;
@@ -566,9 +577,17 @@ async function pollSessionMessages() {
       updateLockButton();
     }
     (data.messages || []).forEach(handleIncomingGroupMessage);
+    // Pulih dari kegagalan sementara — kembalikan status normal tanpa berisik
+    if (state.pollFailCount > 0) {
+      state.pollFailCount = 0;
+      setSessionStatus("Tersambung ke \"" + state.roomName + "\" (" + state.sessionCode + ")", "online");
+    }
   } catch (err) {
-    console.warn("Poll gagal:", err.message);
-    setSessionStatus("Koneksi terganggu: " + err.message, "offline");
+    state.pollFailCount = (state.pollFailCount || 0) + 1;
+    console.warn("Poll gagal (" + state.pollFailCount + "x):", err.message);
+    if (state.pollFailCount >= POLL_FAIL_THRESHOLD) {
+      setSessionStatus("Koneksi terganggu: " + err.message + " — mencoba lagi...", "offline");
+    }
   }
 }
 
