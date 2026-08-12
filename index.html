@@ -20,6 +20,7 @@
     <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
       <span class="status-pill"><span id="netDot" class="dot"></span> <span id="netText">Memeriksa...</span></span>
       <span class="status-pill">⏱️ <span id="latencyText">-- ms</span></span>
+      <span class="status-pill" id="backendStatusPill"><span id="backendDot" class="dot"></span> <span id="backendStatusText">Backend: Demo</span></span>
       <button class="btn btn-ghost" id="btnSettings">⚙️ Pengaturan</button>
     </div>
   </header>
@@ -204,7 +205,11 @@
       <button class="btn btn-ghost" id="btnToggleKeyVisibility" type="button" title="Lihat/sembunyikan">👁️</button>
     </div>
     <p class="small-note" id="copyFeedback" style="min-height:16px;color:var(--green);"></p>
-    <button class="btn btn-primary" id="btnSaveSettings">Simpan Pengaturan</button>
+    <div style="display:flex;gap:10px;flex-wrap:wrap;">
+      <button class="btn btn-primary" id="btnSaveSettings">Simpan Pengaturan</button>
+      <button class="btn btn-secondary" id="btnTestConnection">🔌 Tes Koneksi Backend</button>
+    </div>
+    <p class="small-note" id="testConnectionResult" style="margin-top:10px;min-height:16px;"></p>
     <p class="small-note" style="margin-top:14px;">Lihat file <code>backend/Code.gs</code> dan <code>DEPLOY_GUIDE.md</code> untuk cara deploy backend Apps Script Anda sendiri.</p>
   </div>
 </div>

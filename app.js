@@ -169,8 +169,102 @@ $("btnSaveSettings").addEventListener("click", () => {
   localStorage.setItem("mapin_backend", state.backend);
   localStorage.setItem("mapin_url", state.appsScriptUrl);
   localStorage.setItem("mapin_key", state.appsScriptKey);
-  closeModal("settingsModal");
+  updateBackendStatusPill();
+  showCopyFeedback("✅ Pengaturan disimpan di HP ini.");
+  setTimeout(() => closeModal("settingsModal"), 700);
 });
+
+// ---------- Indikator status backend (selalu terlihat di layar utama) ----------
+function updateBackendStatusPill() {
+  const dot = $("backendDot");
+  const text = $("backendStatusText");
+  if (state.backend === "appsscript") {
+    if (state.appsScriptUrl && state.appsScriptKey) {
+      dot.className = "dot online";
+      text.textContent = "Backend: Produksi";
+    } else {
+      dot.className = "dot offline";
+      text.textContent = "Backend: Produksi (belum lengkap)";
+    }
+  } else {
+    dot.className = "dot connecting";
+    text.textContent = "Backend: Demo";
+  }
+}
+updateBackendStatusPill();
+
+// ---------- Tes Koneksi Backend — diagnosa langkah demi langkah dari HP ----------
+async function testBackendConnection() {
+  const resultEl = $("testConnectionResult");
+  const url = $("appsScriptUrl").value.trim();
+  const key = $("appsScriptKey").value.trim();
+
+  resultEl.style.color = "var(--muted)";
+  resultEl.textContent = "🔄 Menguji koneksi...";
+
+  if (!url) {
+    resultEl.style.color = "#e04b4b";
+    resultEl.textContent = "⚠️ Kolom URL masih kosong. Isi dulu URL Web App dari Apps Script.";
+    return;
+  }
+  if (!/^https:\/\/script\.google\.com\/macros\/s\/.+\/exec$/.test(url)) {
+    resultEl.style.color = "#e04b4b";
+    resultEl.textContent = "⚠️ Format URL tampak tidak sesuai. Harus mulai dengan https://script.google.com/macros/s/ dan berakhiran /exec (bukan /dev).";
+    return;
+  }
+
+  // Langkah 1: cek server bisa dijangkau sama sekali (doGet, tidak butuh API key)
+  try {
+    const res = await fetch(url, { method: "GET" });
+    if (!res.ok) {
+      resultEl.style.color = "#e04b4b";
+      resultEl.textContent = "⚠️ Server merespons tapi error (status " + res.status + "). Cek kembali deployment Apps Script Anda (Deploy > Manage deployments > pastikan 'Who has access' = Anyone).";
+      return;
+    }
+    const data = await res.json();
+    if (data.status !== "ok") {
+      resultEl.style.color = "#e04b4b";
+      resultEl.textContent = "⚠️ Server terjangkau tapi respons tidak sesuai. Pastikan Code.gs sudah ter-deploy versi terbaru.";
+      return;
+    }
+  } catch (err) {
+    resultEl.style.color = "#e04b4b";
+    resultEl.textContent = "❌ Tidak bisa menjangkau URL sama sekali (" + err.message + "). Cek lagi: URL sudah benar-benar dari 'New deployment' (bukan draft), dan 'Who has access' = Anyone.";
+    return;
+  }
+
+  if (!key) {
+    resultEl.style.color = "#e8a92c";
+    resultEl.textContent = "🟡 Server terjangkau! Tapi kolom API Key masih kosong — isi dengan nilai yang SAMA PERSIS seperti Script Properties > API_KEY di Apps Script.";
+    return;
+  }
+
+  // Langkah 2: cek API key valid (panggil action translate ringan)
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain;charset=utf-8" },
+      body: JSON.stringify({ apiKey: key, action: "translate", text: "test", source: "id", target: "en" })
+    });
+    const data = await res.json();
+    if (data.error && /Unauthorized|API key/i.test(data.error)) {
+      resultEl.style.color = "#e04b4b";
+      resultEl.textContent = "❌ Server terjangkau, TAPI API Key tidak cocok. Cek lagi nilai Script Properties > API_KEY di Apps Script (harus sama persis, tanpa spasi tambahan).";
+      return;
+    }
+    if (data.error) {
+      resultEl.style.color = "#e8a92c";
+      resultEl.textContent = "🟡 API Key valid, tapi ada pesan lain dari server: " + data.error;
+      return;
+    }
+    resultEl.style.color = "var(--green)";
+    resultEl.textContent = "✅ Berhasil! Server & API Key valid. Simpan Pengaturan lalu coba Mode Grup lagi.";
+  } catch (err) {
+    resultEl.style.color = "#e04b4b";
+    resultEl.textContent = "❌ Gagal menguji API Key: " + err.message;
+  }
+}
+$("btnTestConnection").addEventListener("click", testBackendConnection);
 
 // ---------- Salin ke clipboard (URL & API Key) — berguna terutama di HP ----------
 function showCopyFeedback(msg) {
