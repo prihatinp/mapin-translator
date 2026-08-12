@@ -1061,6 +1061,17 @@ function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTransc
   // terputus dan terkirim sebelum selesai. Baru dikirim saat tombol
   // benar-benar dilepas (lihat stop()).
   let pttBuffer = "";
+  // Di beberapa browser/HP, mode continuous:true (dipakai supaya jeda hening
+  // TIDAK memutus sesi — lihat komentar di beginRecognition) ternyata malah
+  // membuat browser TIDAK PERNAH menandai ucapan sebagai "final" untuk
+  // kalimat pendek — hasilnya cuma terus muncul sebagai teks sementara
+  // (interim) yang tidak pernah masuk ke pttBuffer, jadi saat tombol
+  // dilepas tidak ada apa pun yang terkirim ("gak respon" walau sudah
+  // bicara). Makanya teks interim TERAKHIR juga disimpan di sini, supaya
+  // saat tombol dilepas (atau sesi harus disambung ulang) apa pun yang
+  // sedang terdengar—final ataupun belum—tetap dianggap sebagai ucapan
+  // yang harus dikirim, bukan hilang begitu saja.
+  let lastInterimText = "";
   // Watchdog: sebagian browser (terutama untuk ucapan yang agak panjang)
   // punya bug dikenal di mode continuous — sesi rekognisi bisa diam-diam
   // "macet" tanpa memicu onend/onerror sama sekali, jadi mic terlihat
@@ -1072,6 +1083,17 @@ function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTransc
   let lastActivityAt = 0;
   let watchdogTimer = null;
   const IDLE_RESTART_MS = 8000;
+
+  // Pindahkan teks interim yang belum sempat "final" ke pttBuffer — dipanggil
+  // sebelum recognizer disambung ulang (baik otomatis maupun oleh watchdog)
+  // atau sebelum tombol dilepas, supaya tidak ada kata yang hilang.
+  function flushInterimToBuffer() {
+    const t = lastInterimText.trim();
+    if (t) {
+      pttBuffer = pttBuffer ? (pttBuffer + " " + t) : t;
+      lastInterimText = "";
+    }
+  }
 
   async function handleFinalText(text, sourceLangOverride) {
     $(liveTextId).textContent = "";
@@ -1116,12 +1138,14 @@ function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTransc
       continuous: true,
       onInterim: (t) => {
         lastActivityAt = Date.now();
+        if (isPtt) lastInterimText = t;
         $(liveTextId).textContent = isPtt ? (pttBuffer ? pttBuffer + " " + t : t) : t;
       },
       onFinal: (t) => {
         lastActivityAt = Date.now();
         if (isPtt) {
           // PTT: kumpulkan dulu, JANGAN kirim — dikirim nanti saat tombol dilepas
+          lastInterimText = "";
           pttBuffer = pttBuffer ? (pttBuffer + " " + t) : t;
           $(liveTextId).textContent = pttBuffer;
         } else {
@@ -1134,6 +1158,7 @@ function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTransc
         listening = false;
         setMicListening(micBtnId, false);
         if (recognizer !== thisRec) return; // event basi dari instance lama yang sudah digantikan (mis. oleh watchdog) — abaikan
+        if (isPtt) flushInterimToBuffer(); // jangan sampai teks yang belum "final" hilang saat sesi disambung ulang
         // Browser kadang menghentikan sesi rekognisi sendiri walau sudah
         // diminta continuous:true (mis. jeda hening cukup lama). Selama
         // tombol PTT masih ditahan (atau mode hands-free masih aktif),
@@ -1161,6 +1186,7 @@ function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTransc
   function start() {
     if (!state.sessionActive) { alert("Tekan 'Mulai Sesi' terlebih dahulu."); return; }
     pttBuffer = "";
+    lastInterimText = "";
     if (!beginRecognition()) return;
     listening = true;
     setMicListening(micBtnId, true);
@@ -1171,6 +1197,7 @@ function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTransc
       if (idleMs > IDLE_RESTART_MS) {
         console.warn("Mic idle " + Math.round(idleMs / 1000) + "s tanpa aktivitas — menyambungkan ulang otomatis.");
         showTransientNote("🔄 mic tidak merespons, menyambungkan ulang...");
+        if (state.mode === "ptt") flushInterimToBuffer();
         if (recognizer) {
           recognizer.__shouldRestart = false; // instance lama, jangan biarkan onend-nya ikut memicu restart kedua
           try { recognizer.abort ? recognizer.abort() : recognizer.stop(); } catch {}
@@ -1191,13 +1218,18 @@ function makeSpeakerController({ micBtnId, liveTextId, transcriptId, otherTransc
     }
     setMicListening(micBtnId, false);
     $(liveTextId).textContent = "";
-    // PTT: kirim SEKARANG, tepat saat tombol dilepas — mengumpulkan seluruh
-    // kalimat yang terkumpul selama tombol ditahan (termasuk yang melewati
-    // jeda hening di tengah-tengah).
-    if (state.mode === "ptt" && pttBuffer.trim()) {
-      const text = pttBuffer.trim();
-      pttBuffer = "";
-      handleFinalText(text);
+    // PTT: kirim SEKARANG, tepat saat tombol dilepas — gabungkan semua yang
+    // sudah "final" (pttBuffer) DAN sisa teks yang masih "interim" saat
+    // tombol dilepas (browser tertentu tidak pernah menandai ucapan pendek
+    // sebagai final sama sekali — tanpa baris ini pesan itu akan hilang
+    // tanpa terkirim, persis keluhan "ucapan pendek pun aplikasi gak respon").
+    if (state.mode === "ptt") {
+      flushInterimToBuffer();
+      if (pttBuffer.trim()) {
+        const text = pttBuffer.trim();
+        pttBuffer = "";
+        handleFinalText(text);
+      }
     }
   }
 
@@ -1237,10 +1269,23 @@ function initGroupMic() {
   // ditahan, baru kirim saat dilepas — supaya jeda hening di tengah bicara
   // tidak membuat kalimat terpotong & terkirim sebelum selesai.
   let pttBuffer = "";
+  // Lihat catatan panjang di makeSpeakerController: sebagian browser tidak
+  // pernah menandai ucapan pendek sebagai "final" sama sekali di mode
+  // continuous — jadi teks interim TERAKHIR juga disimpan supaya tidak
+  // hilang begitu saja saat tombol dilepas.
+  let lastInterimText = "";
 
   let lastActivityAt = 0;
   let watchdogTimer = null;
   const IDLE_RESTART_MS = 8000;
+
+  function flushInterimToBuffer() {
+    const t = lastInterimText.trim();
+    if (t) {
+      pttBuffer = pttBuffer ? (pttBuffer + " " + t) : t;
+      lastInterimText = "";
+    }
+  }
 
   async function handleFinalText(text) {
     $("liveGroup").textContent = "";
@@ -1262,11 +1307,13 @@ function initGroupMic() {
       continuous: true,
       onInterim: (t) => {
         lastActivityAt = Date.now();
+        if (isPtt) lastInterimText = t;
         $("liveGroup").textContent = isPtt ? (pttBuffer ? pttBuffer + " " + t : t) : t;
       },
       onFinal: (t) => {
         lastActivityAt = Date.now();
         if (isPtt) {
+          lastInterimText = "";
           pttBuffer = pttBuffer ? (pttBuffer + " " + t) : t;
           $("liveGroup").textContent = pttBuffer;
         } else {
@@ -1277,6 +1324,7 @@ function initGroupMic() {
         listening = false;
         setMicListening("micGroup", false);
         if (recognizer !== thisRec) return; // event basi dari instance lama — abaikan
+        if (isPtt) flushInterimToBuffer();
         if (state.sessionActive && thisRec.__shouldRestart) {
           try { beginRecognition(); listening = true; setMicListening("micGroup", true); } catch {}
         }
@@ -1301,6 +1349,7 @@ function initGroupMic() {
     if (!state.sessionActive) { alert("Tekan 'Mulai Sesi' terlebih dahulu."); return; }
     if (!state.sessionConnected) { alert("Gabung/buat sesi grup terlebih dahulu."); return; }
     pttBuffer = "";
+    lastInterimText = "";
     if (!beginRecognition()) return;
     listening = true;
     setMicListening("micGroup", true);
@@ -1311,6 +1360,7 @@ function initGroupMic() {
       if (idleMs > IDLE_RESTART_MS) {
         console.warn("Mic idle " + Math.round(idleMs / 1000) + "s tanpa aktivitas — menyambungkan ulang otomatis.");
         showTransientNote("🔄 mic tidak merespons, menyambungkan ulang...");
+        if (state.mode === "ptt") flushInterimToBuffer();
         if (recognizer) {
           recognizer.__shouldRestart = false;
           try { recognizer.abort ? recognizer.abort() : recognizer.stop(); } catch {}
@@ -1328,10 +1378,13 @@ function initGroupMic() {
     if (recognizer) { recognizer.__shouldRestart = false; try { recognizer.stop(); } catch {} }
     setMicListening("micGroup", false);
     $("liveGroup").textContent = "";
-    if (state.mode === "ptt" && pttBuffer.trim()) {
-      const text = pttBuffer.trim();
-      pttBuffer = "";
-      handleFinalText(text);
+    if (state.mode === "ptt") {
+      flushInterimToBuffer();
+      if (pttBuffer.trim()) {
+        const text = pttBuffer.trim();
+        pttBuffer = "";
+        handleFinalText(text);
+      }
     }
   }
 
