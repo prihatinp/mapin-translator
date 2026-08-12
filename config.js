@@ -44,7 +44,7 @@
 // ============================================================
 
 const MAPIN_CONFIG = {
-  backendMode: "https://mapin-translator-default-rtdb.asia-southeast1.firebasedatabase.app/",
+  backendMode: "firebase",
   appsScriptUrl: "https://script.google.com/macros/s/AKfycbzzBDI1FCfMYhpPrN_aN9eTwPrYiviDcFrqo5V9znh_VdMWVZlxftJRQRpK69MCLMKhEA/exec",
   appsScriptApiKey: "MapinRahasia2026Musashi!",
 

@@ -265,14 +265,14 @@ async function testFirebaseConnection() {
     const data = await res.json();
     if (!res.ok || !data.translatedText) {
       resultEl.style.color = "#e8a92c";
-      resultEl.textContent = "🟡 Firebase OK, tapi mirror LibreTranslate ini sedang bermasalah (" + (data.error || res.status) + "). Coba ganti ke mirror lain di DEPLOY_GUIDE.md 'Opsi C'.";
+      resultEl.textContent = "🟡 Firebase OK, tapi mirror LibreTranslate ini sedang bermasalah (" + (data.error || res.status) + "). Mode Grup tetap bisa dipakai — aplikasi otomatis pakai MyMemory sebagai cadangan sampai mirror ini pulih. Bisa juga ganti ke mirror lain di DEPLOY_GUIDE.md 'Opsi C'.";
       return;
     }
     resultEl.style.color = "var(--green)";
     resultEl.textContent = "✅ Berhasil! Firebase & LibreTranslate keduanya terjangkau. Simpan Pengaturan lalu coba Mode Grup lagi.";
   } catch (err) {
     resultEl.style.color = "#e8a92c";
-    resultEl.textContent = "🟡 Firebase OK, tapi gagal menghubungi LibreTranslate (" + err.message + "). Coba ganti mirror-nya.";
+    resultEl.textContent = "🟡 Firebase OK, tapi gagal menghubungi LibreTranslate (" + err.message + "). Mode Grup tetap bisa dipakai — aplikasi otomatis pakai MyMemory sebagai cadangan sampai mirror ini pulih atau diganti.";
   }
 }
 
@@ -455,7 +455,7 @@ async function translateText(text, sourceCode, targetCode) {
   if (state.backend === "appsscript" && state.appsScriptUrl) {
     translated = await translateViaAppsScript(protectedText, sourceCode, targetCode);
   } else if (state.backend === "firebase" && state.libreTranslateUrl) {
-    translated = await translateViaLibreTranslate(protectedText, sourceCode, targetCode);
+    translated = await translateViaLibreTranslateWithFallback(protectedText, sourceCode, targetCode);
   } else {
     translated = await translateViaDemoApi(protectedText, sourceCode, targetCode);
   }
@@ -498,6 +498,27 @@ async function translateViaLibreTranslate(text, sourceCode, targetCode, retriesL
       return translateViaLibreTranslate(text, sourceCode, targetCode, retriesLeft - 1);
     }
     throw err;
+  }
+}
+
+// Mirror publik LibreTranslate dijalankan komunitas (bukan Google/perusahaan
+// besar) — kadang down atau CORS-nya menolak domain di luar frontend resmi
+// mereka. Supaya Mode Grup TIDAK ikut mati total hanya karena satu mirror
+// sedang bermasalah, kalau LibreTranslate gagal (setelah retry di atas),
+// aplikasi jatuh ke MyMemory (mesin yang sama seperti Mode Demo — CORS-nya
+// selalu terbuka untuk semua domain, sudah terbukti stabil) sebagai
+// cadangan. Akurasi turun sementara ke level Mode Demo, tapi Mode Grup
+// tetap berfungsi sampai mirror LibreTranslate pulih atau diganti manual.
+async function translateViaLibreTranslateWithFallback(text, sourceCode, targetCode) {
+  try {
+    return await translateViaLibreTranslate(text, sourceCode, targetCode);
+  } catch (err) {
+    console.warn("LibreTranslate gagal, jatuh ke MyMemory sebagai cadangan:", err.message);
+    try {
+      return await translateViaDemoApi(text, sourceCode, targetCode);
+    } catch (err2) {
+      throw err; // laporkan error LibreTranslate asli kalau cadangan juga gagal
+    }
   }
 }
 
@@ -903,7 +924,7 @@ async function pollSessionMessagesFirebase_() {
     const m = messages[key];
     if (m.participantId === state.participantId) continue; // pesan sendiri sudah tampil lokal
     try {
-      const translatedText = await translateViaLibreTranslate(m.original, m.sourceLang, state.myLang);
+      const translatedText = await translateViaLibreTranslateWithFallback(m.original, m.sourceLang, state.myLang);
       handleIncomingGroupMessage({ participantId: m.participantId, name: m.name, sourceLang: m.sourceLang, original: m.original, translatedText });
     } catch (err) {
       console.warn("Gagal menerjemahkan pesan masuk:", err.message);
