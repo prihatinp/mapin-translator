@@ -196,10 +196,14 @@
     </div>
     <div class="row">
       <input type="text" id="appsScriptUrl" placeholder="URL Web App Apps Script (https://script.google.com/macros/s/.../exec)" />
+      <button class="btn btn-secondary" id="btnCopyUrl" type="button" title="Salin URL">📋</button>
     </div>
     <div class="row">
       <input type="password" id="appsScriptKey" placeholder="API Key (harus sama dengan Script Properties di Apps Script)" />
+      <button class="btn btn-secondary" id="btnCopyKey" type="button" title="Salin API Key">📋</button>
+      <button class="btn btn-ghost" id="btnToggleKeyVisibility" type="button" title="Lihat/sembunyikan">👁️</button>
     </div>
+    <p class="small-note" id="copyFeedback" style="min-height:16px;color:var(--green);"></p>
     <button class="btn btn-primary" id="btnSaveSettings">Simpan Pengaturan</button>
     <p class="small-note" style="margin-top:14px;">Lihat file <code>backend/Code.gs</code> dan <code>DEPLOY_GUIDE.md</code> untuk cara deploy backend Apps Script Anda sendiri.</p>
   </div>

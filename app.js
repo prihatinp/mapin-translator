@@ -172,6 +172,43 @@ $("btnSaveSettings").addEventListener("click", () => {
   closeModal("settingsModal");
 });
 
+// ---------- Salin ke clipboard (URL & API Key) — berguna terutama di HP ----------
+function showCopyFeedback(msg) {
+  const el = $("copyFeedback");
+  el.textContent = msg;
+  setTimeout(() => { if (el.textContent === msg) el.textContent = ""; }, 2000);
+}
+
+async function copyToClipboard(text, label) {
+  if (!text) { showCopyFeedback("⚠️ " + label + " masih kosong."); return; }
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+    } else {
+      // Fallback untuk browser/HP lama atau konteks non-HTTPS
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
+    showCopyFeedback("✅ " + label + " disalin ke clipboard.");
+  } catch (err) {
+    showCopyFeedback("⚠️ Gagal menyalin: " + err.message);
+  }
+}
+
+$("btnCopyUrl").addEventListener("click", () => copyToClipboard($("appsScriptUrl").value.trim(), "URL"));
+$("btnCopyKey").addEventListener("click", () => copyToClipboard($("appsScriptKey").value.trim(), "API Key"));
+$("btnToggleKeyVisibility").addEventListener("click", () => {
+  const input = $("appsScriptKey");
+  input.type = input.type === "password" ? "text" : "password";
+});
+
 // ---------- Glossary modal ----------
 function renderGlossary() {
   const list = $("glossaryList");
